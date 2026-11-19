@@ -17,7 +17,6 @@ views), which keeps the diagram and the editor in sync (UI-5).
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Iterable
 from datetime import date
 from pathlib import Path
@@ -52,11 +51,11 @@ from fishy.domain.tasks import (
 )
 from fishy.domain.tasks import task_groups as _task_groups
 from fishy.layout import LayoutNode
+from fishy.markdown_render import task_ids
 from fishy.storage import Repository
 from fishy.storage.repository import RuleError
 
 NEUTRAL_CATEGORY_COLOR = "#37474f"
-_TASK_REF = re.compile(r"\[\[task:(\d+)\]\]")
 
 
 class _Command(QUndoCommand):
@@ -608,7 +607,7 @@ class ProjectDocument(QObject):
 
     def entries_referencing_task(self, task_id: int) -> list[LogEntry]:
         return [e for e in self.repo.all_log_entries()
-                if task_id in {int(m) for m in _TASK_REF.findall(e.body_md or "")}]
+                if task_id in task_ids(e.body_md)]
 
     def _after_tasks(self) -> None:
         self._reload_tasks()
