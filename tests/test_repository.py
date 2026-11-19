@@ -282,7 +282,7 @@ def test_v1_files_upgrade_to_v2(tmp_path, monkeypatch):
     old.close()
     monkeypatch.undo()
     r = Repository.open(tmp_path / "old.fishy")
-    assert db.schema_version(r.conn) == 2
+    assert db.schema_version(r.conn) == db.latest_version()
     p = r.project()
     assert p.show_legend and p.show_status and p.legend_position == "bottom-left"
     assert any(b.title == "kept" for b in r.bones())

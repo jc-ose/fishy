@@ -22,7 +22,8 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,8 @@ from fishy.domain import (
     Project,
     Status,
     StatusRole,
+    Task,
+    TaskState,
     User,
 )
 
@@ -79,6 +82,19 @@ def _status(r: sqlite3.Row) -> Status:
                   icon=r["icon"], sort_order=r["sort_order"], is_default=bool(r["is_default"]))
 
 
+def _task_state(r: sqlite3.Row) -> TaskState:
+    return TaskState(id=r["id"], name=r["name"], color=r["color"], symbol=r["symbol"],
+                     role=StatusRole(r["role"]), sort_order=r["sort_order"],
+                     is_default=bool(r["is_default"]))
+
+
+def _task(r: sqlite3.Row, bone_ids: list[int]) -> Task:
+    return Task(id=r["id"], title=r["title"], state_id=r["state_id"], notes=r["notes"],
+                assignee=r["assignee"], due_date=r["due_date"], critical=bool(r["critical"]),
+                bone_ids=bone_ids, created_at=r["created_at"], updated_at=r["updated_at"],
+                created_by=r["created_by"], updated_by=r["updated_by"])
+
+
 def _entry(r: sqlite3.Row) -> LogEntry:
     return LogEntry(id=r["id"], bone_id=r["bone_id"], position=r["position"],
                     body_md=r["body_md"], title=r["title"], created_at=r["created_at"],
@@ -93,6 +109,8 @@ class Repository:
     LEGEND_POSITIONS = ("bottom-left", "bottom-right", "right")
     LEVEL_FIELDS = {"name", "color", "definition", "eliminated"}
     STATUS_FIELDS = {"name", "color", "role", "icon"}
+    TASK_STATE_FIELDS = {"name", "color", "symbol", "role"}
+    TASK_FIELDS = {"title", "notes", "state_id", "assignee", "due_date", "critical"}
 
     def __init__(self, conn: sqlite3.Connection, path: Path | None = None) -> None:
         self.conn = conn
@@ -311,8 +329,48 @@ class Repository:
     def delete_status(self, status_id: int, reassign_to: int) -> Snapshot:
         return self._delete_choice("status", "status_id", status_id, reassign_to)
 
+    # ----- task states (configured like statuses; tasks refer to them) ----- #
+
+    def task_states(self) -> list[TaskState]:
+        return [_task_state(r) for r in self.conn.execute(
+            "SELECT * FROM task_state ORDER BY sort_order")]
+
+    def default_task_state_id(self) -> int:
+        r = self.conn.execute("SELECT id FROM task_state ORDER BY is_default DESC, sort_order "
+                              "LIMIT 1").fetchone()
+        return r["id"]
+
+    def add_task_state(self, name: str, color: str, symbol: str,
+                       role: StatusRole = StatusRole.ACTIVE, index: int | None = None) -> int:
+        return self._add_choice("task_state", index, dict(
+            name=name, color=color, symbol=symbol, role=StatusRole(role).value))
+
+    def update_task_state(self, state_id: int, **fields: Any) -> dict[str, Any]:
+        self._check_fields(fields, self.TASK_STATE_FIELDS)
+        with self.tx():
+            if "role" in fields:
+                fields["role"] = StatusRole(fields["role"]).value
+                if fields["role"] != StatusRole.DONE.value:
+                    self._check_done_role_kept(excluding=state_id)
+            return self._update_logged("task_state", state_id, fields)
+
+    def move_task_state(self, state_id: int, new_index: int) -> int:
+        return self._move_choice("task_state", state_id, new_index)
+
+    def set_default_task_state(self, state_id: int) -> int:
+        return self._set_default("task_state", state_id)
+
+    def delete_task_state(self, state_id: int, reassign_to: int) -> Snapshot:
+        return self._delete_choice("task_state", "state_id", state_id, reassign_to,
+                                   ref_table="task")
+
+    def _check_done_role_kept(self, excluding: int) -> None:
+        if not self.conn.execute("SELECT 1 FROM task_state WHERE role = 'done' AND id != ?",
+                                 (excluding,)).fetchone():
+            raise RuleError("At least one task state must count as done.")
+
     def restore_choice(self, snap: Snapshot) -> None:
-        """Undo `delete_level` / `delete_status`."""
+        """Undo `delete_level` / `delete_status` / `delete_task_state`."""
         table, column = snap["meta"][0]["table"], snap["meta"][0]["column"]
         row = snap["row"][0]
         with self.tx():
@@ -320,8 +378,9 @@ class Repository:
                 f"UPDATE {table} SET sort_order = sort_order + 1 WHERE sort_order >= ?",
                 (row["sort_order"],))
             self._insert_row(table, row)
-            ids = [b["id"] for b in snap["bones"]]
-            self.conn.executemany(f"UPDATE bone SET {column} = ? WHERE id = ?",
+            ref_table = snap["meta"][0].get("ref_table", "bone")
+            ids = [r["id"] for r in snap["refs"]]
+            self.conn.executemany(f"UPDATE {ref_table} SET {column} = ? WHERE id = ?",
                                   [(row["id"], i) for i in ids])
             if row["is_default"]:
                 self.conn.execute(f"UPDATE {table} SET is_default = (id = ?)", (row["id"],))
@@ -363,7 +422,8 @@ class Repository:
             self._history("set_default", table, row_id, {"id": old and old[0]}, {"id": row_id})
         return old[0] if old else row_id
 
-    def _delete_choice(self, table: str, column: str, row_id: int, reassign_to: int) -> Snapshot:
+    def _delete_choice(self, table: str, column: str, row_id: int, reassign_to: int,
+                       ref_table: str = "bone") -> Snapshot:
         if reassign_to == row_id:
             raise RuleError("Choose a different value to reassign to.")
         with self.tx():
@@ -375,9 +435,11 @@ class Repository:
             if row is None or not self.conn.execute(
                     f"SELECT 1 FROM {table} WHERE id = ?", (reassign_to,)).fetchone():
                 raise RuleError(f"Unknown {table}.")
-            bones = [dict(r) for r in self.conn.execute(
-                f"SELECT id FROM bone WHERE {column} = ?", (row_id,))]
-            self.conn.execute(f"UPDATE bone SET {column} = ? WHERE {column} = ?",
+            if table == "task_state":
+                self._check_done_role_kept(excluding=row_id)
+            refs = [dict(r) for r in self.conn.execute(
+                f"SELECT id FROM {ref_table} WHERE {column} = ?", (row_id,))]
+            self.conn.execute(f"UPDATE {ref_table} SET {column} = ? WHERE {column} = ?",
                               (reassign_to, row_id))
             self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
             self.conn.execute(
@@ -386,7 +448,8 @@ class Repository:
             if row["is_default"]:
                 self.conn.execute(f"UPDATE {table} SET is_default = (id = ?)", (reassign_to,))
             self._history("delete", table, row_id, row, {"reassigned_to": reassign_to})
-        return {"meta": [{"table": table, "column": column}], "row": [row], "bones": bones}
+        return {"meta": [{"table": table, "column": column, "ref_table": ref_table}],
+                "row": [row], "refs": refs}
 
     # ===================================================================== #
     # Bones
@@ -711,6 +774,147 @@ class Repository:
         if r is None:
             raise KeyError(att_id)
         return bytes(r[0])
+
+    # ===================================================================== #
+    # Tasks
+    # ===================================================================== #
+
+    def task_links(self) -> dict[int, set[int]]:
+        """Bone id → ids of the tasks linked to it."""
+        out: dict[int, set[int]] = {}
+        for r in self.conn.execute("SELECT task_id, bone_id FROM task_bone"):
+            out.setdefault(r["bone_id"], set()).add(r["task_id"])
+        return out
+
+    def _bone_ids_by_task(self) -> dict[int, list[int]]:
+        out: dict[int, list[int]] = {}
+        for r in self.conn.execute("SELECT task_id, bone_id FROM task_bone "
+                                   "ORDER BY created_at, rowid"):
+            out.setdefault(r["task_id"], []).append(r["bone_id"])
+        return out
+
+    def tasks(self) -> list[Task]:
+        links = self._bone_ids_by_task()
+        return [_task(r, links.get(r["id"], []))
+                for r in self.conn.execute("SELECT * FROM task ORDER BY id")]
+
+    def task(self, task_id: int) -> Task:
+        r = self.conn.execute("SELECT * FROM task WHERE id = ?", (task_id,)).fetchone()
+        if r is None:
+            raise KeyError(task_id)
+        bone_ids = [b[0] for b in self.conn.execute(
+            "SELECT bone_id FROM task_bone WHERE task_id = ? ORDER BY created_at, rowid",
+            (task_id,))]
+        return _task(r, bone_ids)
+
+    def _clean_task_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
+        out = dict(fields)
+        if "title" in out:
+            title = (out["title"] or "").strip()
+            if not title:
+                raise RuleError("A task needs a title.")
+            out["title"] = title
+        if "assignee" in out:
+            out["assignee"] = (out["assignee"] or "").strip() or None
+        if "due_date" in out:
+            due = out["due_date"] or None
+            if due is not None:
+                try:
+                    due = date.fromisoformat(str(due)).isoformat()
+                except ValueError:
+                    raise RuleError(f"“{due}” isn't a date (use YYYY-MM-DD).") from None
+            out["due_date"] = due
+        if "notes" in out:
+            out["notes"] = out["notes"] or ""
+        if "critical" in out:
+            out["critical"] = int(bool(out["critical"]))
+        if "state_id" in out and not self.conn.execute(
+                "SELECT 1 FROM task_state WHERE id = ?", (out["state_id"],)).fetchone():
+            raise RuleError("Unknown task state.")
+        return out
+
+    def add_task(self, title: str, bone_ids: Iterable[int] = (), state_id: int | None = None,
+                 **fields: Any) -> int:
+        self._check_fields(fields, self.TASK_FIELDS - {"title", "state_id"})
+        with self.tx():
+            values = self._clean_task_fields(
+                {"title": title, "state_id": state_id or self.default_task_state_id(),
+                 **fields})
+            ts = now_utc()
+            values.update(created_at=ts, updated_at=ts, created_by=self.user_id,
+                          updated_by=self.user_id)
+            task_id = self._insert_row("task", values)
+            self._history("create", "task", task_id, None, values)
+            for bone_id in bone_ids:
+                self.link_task(task_id, bone_id)
+        return task_id
+
+    def update_task(self, task_id: int, **fields: Any) -> dict[str, Any]:
+        """Change task fields; returns the old values (for undo)."""
+        self._check_fields(fields, self.TASK_FIELDS)
+        with self.tx():
+            return self._update_logged("task", task_id, self._clean_task_fields(fields))
+
+    def delete_task(self, task_id: int) -> Snapshot:
+        with self.tx():
+            row = _row(self.conn.execute("SELECT * FROM task WHERE id = ?",
+                                         (task_id,)).fetchone())
+            if row is None:
+                raise KeyError(task_id)
+            links = [dict(r) for r in self.conn.execute(
+                "SELECT * FROM task_bone WHERE task_id = ? ORDER BY created_at, rowid",
+                (task_id,))]
+            self.conn.execute("DELETE FROM task WHERE id = ?", (task_id,))
+            self._history("delete", "task", task_id, row, {"links": len(links)})
+        return {"task": [row], "links": links}
+
+    def restore_task(self, snap: Snapshot) -> None:
+        """Undo `delete_task`, with the same id and links (where the bones still exist)."""
+        with self.tx():
+            row = snap["task"][0]
+            self._insert_row("task", row)
+            for link in snap["links"]:
+                self.restore_link(link)
+            self._history("restore", "task", row["id"], None, row)
+
+    def link_task(self, task_id: int, bone_id: int) -> bool:
+        """Link a task to a bone. False if it was already linked."""
+        with self.tx():
+            self.task(task_id)
+            self.bone(bone_id)
+            if self.conn.execute("SELECT 1 FROM task_bone WHERE task_id = ? AND bone_id = ?",
+                                 (task_id, bone_id)).fetchone():
+                return False
+            values = dict(task_id=task_id, bone_id=bone_id, created_at=now_utc(),
+                          created_by=self.user_id)
+            self._insert_row("task_bone", values)
+            self._history("link", "task_link", task_id, None, {"bone_id": bone_id})
+        return True
+
+    def unlink_task(self, task_id: int, bone_id: int) -> dict[str, Any] | None:
+        """Remove a link; returns the removed row (for `restore_link`), or None."""
+        with self.tx():
+            row = _row(self.conn.execute(
+                "SELECT * FROM task_bone WHERE task_id = ? AND bone_id = ?",
+                (task_id, bone_id)).fetchone())
+            if row is None:
+                return None
+            self.conn.execute("DELETE FROM task_bone WHERE task_id = ? AND bone_id = ?",
+                              (task_id, bone_id))
+            self._history("unlink", "task_link", task_id, {"bone_id": bone_id}, None)
+        return row
+
+    def restore_link(self, row: dict[str, Any]) -> None:
+        with self.tx():
+            if not self.conn.execute("SELECT 1 FROM bone WHERE id = ?",
+                                     (row["bone_id"],)).fetchone():
+                return  # the bone is gone; nothing to link to
+            self.conn.execute("INSERT OR IGNORE INTO task_bone (task_id, bone_id, created_at, "
+                              "created_by) VALUES (?,?,?,?)",
+                              (row["task_id"], row["bone_id"], row["created_at"],
+                               row["created_by"]))
+            self._history("link", "task_link", row["task_id"], None,
+                          {"bone_id": row["bone_id"]})
 
     # ===================================================================== #
     # Low-level helpers
