@@ -17,7 +17,9 @@ views), which keeps the diagram and the editor in sync (UI-5).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -32,16 +34,29 @@ from fishy.domain import (
     Project,
     Status,
     StatusRole,
+    Task,
+    TaskState,
     category_summary,
     effective_levels,
     level_is_derived,
     numbers,
 )
+from fishy.domain.tasks import (
+    distinct_assignees,
+    is_done,
+    is_overdue,
+    next_state_id,
+    rolled_task_ids,
+    task_sort_key,
+    toggle_target,
+)
+from fishy.domain.tasks import task_groups as _task_groups
 from fishy.layout import LayoutNode
 from fishy.storage import Repository
 from fishy.storage.repository import RuleError
 
 NEUTRAL_CATEGORY_COLOR = "#37474f"
+_TASK_REF = re.compile(r"\[\[task:(\d+)\]\]")
 
 
 class _Command(QUndoCommand):
@@ -67,6 +82,7 @@ class ProjectDocument(QObject):
     projectChanged = Signal()
     choicesChanged = Signal()  # levels or statuses
     logChanged = Signal(int)  # bone id whose evidence log changed
+    tasksChanged = Signal()  # any task, task link or task state changed
     error = Signal(str)
 
     def __init__(self, repo: Repository, parent: QObject | None = None) -> None:
@@ -76,6 +92,7 @@ class ProjectDocument(QObject):
         self.repo = repo
         self.undo_stack = QUndoStack(self)
         self.undo_stack.setUndoLimit(500)
+        self.today: Callable[[], date] = date.today  # injectable for tests (overdue)
         self._reload_all()
         self.model = BoneTreeModel(self)
 
@@ -106,6 +123,12 @@ class ProjectDocument(QObject):
         self._reload_project()
         self._reload_choices()
         self._reload_bones()
+        self._reload_tasks()
+
+    def _reload_tasks(self) -> None:
+        self.task_states: dict[int, TaskState] = {s.id: s for s in self.repo.task_states()}
+        self.tasks: dict[int, Task] = {t.id: t for t in self.repo.tasks()}
+        self.task_links: dict[int, set[int]] = self.repo.task_links()
 
     def _reload_project(self) -> None:
         self.project: Project = self.repo.project()
@@ -367,7 +390,9 @@ class ProjectDocument(QObject):
         self.changed.emit()
 
     def _after_structure(self) -> None:
+        self._reload_tasks()  # bone deletes/restores change task links
         self.model.refresh_derived()
+        self.tasksChanged.emit()
         self.changed.emit()
 
     # ===================================================================== #
@@ -391,8 +416,10 @@ class ProjectDocument(QObject):
     def _after_choices(self) -> None:
         self._reload_choices()
         self._reload_bones()
+        self._reload_tasks()
         self.model.refresh_derived()
         self.choicesChanged.emit()
+        self.tasksChanged.emit()
         self.changed.emit()
 
     def add_level(self, name: str, color: str, definition: str = "",
@@ -547,6 +574,171 @@ class ProjectDocument(QObject):
         self.log_counts = self.repo.log_entry_counts()
         self.model.refresh_derived()
         self.logChanged.emit(bone_id)
+
+    # ===================================================================== #
+    # Tasks
+    # ===================================================================== #
+
+    def ordered_task_states(self) -> list[TaskState]:
+        return sorted(self.task_states.values(), key=lambda s: s.sort_order)
+
+    def is_task_done(self, task_id: int) -> bool:
+        return is_done(self.tasks[task_id], self.task_states)
+
+    def is_task_overdue(self, task_id: int) -> bool:
+        return is_overdue(self.tasks[task_id], self.task_states, self.today())
+
+    def task_groups(self, bone_id: int) -> list[tuple[int, list[int]]]:
+        """Tasks shown for a bone, grouped by cause for categories (spec §4.5)."""
+        key = self._task_key
+        return [(g, sorted(ids, key=key))
+                for g, ids in _task_groups(self.tree, self.task_links, bone_id)]
+
+    def _task_key(self, task_id: int) -> tuple:
+        return task_sort_key(self.tasks[task_id], self.task_states)
+
+    def open_task_info(self, bone_id: int) -> tuple[int, bool]:
+        """(open task count, any open task critical); categories roll up their causes."""
+        open_ids = [t for t in rolled_task_ids(self.tree, self.task_links, bone_id)
+                    if not self.is_task_done(t)]
+        return len(open_ids), any(self.tasks[t].critical for t in open_ids)
+
+    def assignees(self) -> list[str]:
+        return distinct_assignees(self.tasks.values())
+
+    def entries_referencing_task(self, task_id: int) -> list[LogEntry]:
+        return [e for e in self.repo.all_log_entries()
+                if task_id in {int(m) for m in _TASK_REF.findall(e.body_md or "")}]
+
+    def _after_tasks(self) -> None:
+        self._reload_tasks()
+        self.model.refresh_derived()
+        self.tasksChanged.emit()
+        self.changed.emit()
+
+    def add_task(self, title: str, bone_ids: Iterable[int] = (), **fields: Any) -> int | None:
+        bone_ids = list(bone_ids)
+        state: dict[str, Any] = {}
+
+        def do() -> None:
+            if "snap" in state:  # redo: same id
+                self.repo.restore_task(state["snap"])
+            else:
+                state["id"] = self.repo.add_task(title, bone_ids, **fields)
+            self._after_tasks()
+
+        def undo() -> None:
+            state["snap"] = self.repo.delete_task(state["id"])
+            self._after_tasks()
+
+        return state["id"] if self._run("Add task", do, undo) else None
+
+    def update_task(self, task_id: int, text: str = "Edit task", **fields: Any) -> bool:
+        state: dict[str, Any] = {}
+
+        def do() -> None:
+            state["old"] = self.repo.update_task(task_id, **fields)
+            self._after_tasks()
+
+        def undo() -> None:
+            self.repo.update_task(task_id, **state["old"])
+            self._after_tasks()
+
+        return self._run(text, do, undo)
+
+    def set_task_state(self, task_id: int, state_id: int) -> bool:
+        return self.update_task(task_id, "Change task state", state_id=state_id)
+
+    def toggle_task(self, task_id: int) -> bool:
+        return self.set_task_state(task_id, toggle_target(self.tasks[task_id],
+                                                          self.task_states))
+
+    def cycle_task(self, task_id: int) -> bool:
+        return self.set_task_state(task_id, next_state_id(self.tasks[task_id],
+                                                          self.task_states))
+
+    def delete_task(self, task_id: int) -> bool:
+        state: dict[str, Any] = {}
+
+        def do() -> None:
+            state["snap"] = self.repo.delete_task(task_id)
+            self._after_tasks()
+
+        def undo() -> None:
+            self.repo.restore_task(state["snap"])
+            self._after_tasks()
+
+        return self._run("Delete task", do, undo)
+
+    def link_task(self, task_id: int, bone_id: int) -> bool:
+        state: dict[str, Any] = {}
+
+        def do() -> None:
+            if not self.repo.link_task(task_id, bone_id):
+                raise RuleError("That task is already linked to this bone.")
+            self._after_tasks()
+
+        def undo() -> None:
+            state["row"] = self.repo.unlink_task(task_id, bone_id)
+            self._after_tasks()
+
+        return self._run("Link task", do, undo)
+
+    def unlink_task(self, task_id: int, bone_id: int) -> bool:
+        state: dict[str, Any] = {}
+
+        def do() -> None:
+            row = self.repo.unlink_task(task_id, bone_id)
+            if row is None:
+                raise RuleError("That task isn't linked to this bone.")
+            state["row"] = row
+            self._after_tasks()
+
+        def undo() -> None:
+            self.repo.restore_link(state["row"])
+            self._after_tasks()
+
+        return self._run("Unlink task", do, undo)
+
+    # ----- task states ---------------------------------------------------- #
+
+    def add_task_state(self, name: str, color: str, symbol: str,
+                       role: StatusRole = StatusRole.ACTIVE, index: int | None = None) -> bool:
+        state: dict[str, Any] = {}
+
+        def do() -> int:
+            if "snap" in state:
+                self.repo.restore_choice(state["snap"])
+                return state["id"]
+            state["id"] = self.repo.add_task_state(name, color, symbol, role, index)
+            return state["id"]
+
+        def undo(state_id: int) -> None:
+            other = next(s for s in self.task_states if s != state_id)
+            state["snap"] = self.repo.delete_task_state(state_id, other)
+
+        return self._choice_command(f"Add task state “{name}”", do, undo)
+
+    def update_task_state(self, state_id: int, **fields: Any) -> bool:
+        return self._choice_command(
+            "Edit task state", lambda: self.repo.update_task_state(state_id, **fields),
+            lambda old: self.repo.update_task_state(state_id, **old))
+
+    def move_task_state(self, state_id: int, new_index: int) -> bool:
+        return self._choice_command(
+            "Reorder task states", lambda: self.repo.move_task_state(state_id, new_index),
+            lambda old: self.repo.move_task_state(state_id, old))
+
+    def set_default_task_state(self, state_id: int) -> bool:
+        return self._choice_command(
+            "Set default task state", lambda: self.repo.set_default_task_state(state_id),
+            lambda old: self.repo.set_default_task_state(old))
+
+    def delete_task_state(self, state_id: int, reassign_to: int) -> bool:
+        return self._choice_command(
+            f"Delete task state “{self.task_states[state_id].name}”",
+            lambda: self.repo.delete_task_state(state_id, reassign_to),
+            self.repo.restore_choice)
 
     # ===================================================================== #
     # Diagram
