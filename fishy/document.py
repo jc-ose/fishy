@@ -41,7 +41,9 @@ from fishy.domain import (
     numbers,
 )
 from fishy.domain.tasks import (
+    default_state_id,
     distinct_assignees,
+    done_state_id,
     is_done,
     is_overdue,
     next_state_id,
@@ -54,6 +56,7 @@ from fishy.layout import LayoutNode
 from fishy.markdown_render import task_ids
 from fishy.storage import Repository
 from fishy.storage.repository import RuleError
+from fishy.task_markup import finalize_pending, pending_tasks
 
 NEUTRAL_CATEGORY_COLOR = "#37474f"
 
@@ -540,6 +543,64 @@ class ProjectDocument(QObject):
             self._after_log(bone_id)
 
         return self._run("Edit log entry", do, undo)
+
+    def save_log_entry(self, bone_id: int, entry_id: int | None, body_md: str,
+                       title: str | None, attachments: list[int] | None = None) -> int | None:
+        """Save the entry editor's result (spec §4.9).
+
+        Each ``[[task:new]]`` line becomes a real task linked to `bone_id` (done if
+        it was ``[[task:new:x]]``) and the line becomes ``[[task:<id>]]``, all in one
+        undo step. With no pending lines this is a plain add or update.
+        """
+        pending = pending_tasks(body_md)
+        if not pending:
+            if entry_id is None:
+                return self.add_log_entry(bone_id, body_md, title, attachments=attachments)
+            ok = self.update_log_entry(entry_id, attachments=attachments, body_md=body_md,
+                                       title=title)
+            return entry_id if ok else None
+
+        state: dict[str, Any] = {}
+
+        def do() -> None:
+            with self.repo.tx():
+                if "task_snaps" in state:  # redo: the same task ids
+                    for snap in state["task_snaps"]:
+                        self.repo.restore_task(snap)
+                    ids = state["task_ids"]
+                else:
+                    todo = default_state_id(self.task_states)
+                    done = done_state_id(self.task_states)
+                    ids = [self.repo.add_task(t, [bone_id], state_id=done if checked else todo)
+                           for t, checked in pending]
+                    state["task_ids"] = ids
+                body = finalize_pending(body_md, ids)
+                if entry_id is None:
+                    if "entry_snap" in state:
+                        self.repo.restore_log_entry(state["entry_snap"])
+                        self.repo.update_log_entry(state["id"], body_md=body, title=title)
+                    else:
+                        state["id"] = self.repo.add_log_entry(bone_id, body, title).id
+                        self.repo.assign_attachments(attachments or [], state["id"])
+                else:
+                    state["id"] = entry_id
+                    state["old"] = self.repo.update_log_entry(entry_id, body_md=body,
+                                                              title=title)
+                    self.repo.assign_attachments(attachments or [], entry_id)
+            self._after_log(bone_id)
+            self._after_tasks()
+
+        def undo() -> None:
+            with self.repo.tx():
+                if entry_id is None:
+                    state["entry_snap"] = self.repo.delete_log_entry(state["id"])
+                else:
+                    self.repo.update_log_entry(entry_id, **state["old"])
+                state["task_snaps"] = [self.repo.delete_task(t) for t in state["task_ids"]]
+            self._after_log(bone_id)
+            self._after_tasks()
+
+        return state["id"] if self._run("Save log entry", do, undo) else None
 
     def move_log_entry(self, entry_id: int, new_index: int) -> bool:
         bone_id = self.repo.log_entry(entry_id).bone_id

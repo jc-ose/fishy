@@ -95,3 +95,42 @@ def test_rejected_edit_emits_error_and_pushes_nothing(doc, qtbot):
     with qtbot.waitSignal(doc.error):
         assert doc.update_task(t, title=" ") is False
     assert doc.undo_stack.count() == n
+
+
+def test_save_with_pending_creates_tasks_in_one_step(doc):
+    from fishy.markdown_render import task_ids
+
+    cause = doc.add_bone(doc.tree.roots()[0], "c")
+    n = doc.undo_stack.count()
+    eid = doc.save_log_entry(cause, None, "x\n- [[task:new]] a\n- [[task:new:x]] b\n", None)
+    assert doc.undo_stack.count() == n + 1
+    body = doc.repo.log_entry(eid).body_md
+    ids = task_ids(body)
+    assert len(ids) == 2 and "[[task:new" not in body
+    assert doc.tasks[ids[0]].title == "a" and not doc.is_task_done(ids[0])
+    assert doc.is_task_done(ids[1]) and doc.tasks[ids[1]].bone_ids == [cause]
+    doc.undo_stack.undo()
+    assert not set(ids) & set(doc.tasks)
+    doc.undo_stack.redo()
+    assert set(ids) <= set(doc.tasks) and task_ids(doc.repo.log_entry(eid).body_md) == ids
+
+
+def test_edit_existing_entry_with_pending(doc):
+    from fishy.markdown_render import task_ids
+
+    cause = doc.add_bone(doc.tree.roots()[0], "c")
+    eid = doc.add_log_entry(cause, "- [ ] a\n")
+    doc.save_log_entry(cause, eid, "- [[task:new]] a\n", None)
+    (tid,) = task_ids(doc.repo.log_entry(eid).body_md)
+    doc.undo_stack.undo()
+    assert doc.repo.log_entry(eid).body_md == "- [ ] a\n" and tid not in doc.tasks
+    doc.undo_stack.redo()
+    assert task_ids(doc.repo.log_entry(eid).body_md) == [tid] and tid in doc.tasks
+
+
+def test_save_without_pending_behaves_like_add_and_update(doc):
+    cause = doc.add_bone(doc.tree.roots()[0], "c")
+    eid = doc.save_log_entry(cause, None, "plain", "T")
+    assert doc.repo.log_entry(eid).title == "T"
+    assert doc.save_log_entry(cause, eid, "edited", None) == eid
+    assert doc.repo.log_entry(eid).body_md == "edited"
