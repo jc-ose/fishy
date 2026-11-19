@@ -66,6 +66,35 @@ class Status:
 
 
 @dataclass
+class TaskState:
+    """A user-named task state; the role gives it a fixed meaning (done = complete)."""
+
+    id: int
+    name: str
+    color: str
+    symbol: str  # one glyph drawn as the checkbox
+    role: StatusRole = StatusRole.NOT_STARTED
+    sort_order: int = 0
+    is_default: bool = False
+
+
+@dataclass
+class Task:
+    id: int
+    title: str
+    state_id: int
+    notes: str = ""
+    assignee: str | None = None
+    due_date: str | None = None  # ISO date 'YYYY-MM-DD'
+    critical: bool = False
+    bone_ids: list[int] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+    created_by: int | None = None
+    updated_by: int | None = None
+
+
+@dataclass
 class Bone:
     id: int
     parent_id: int | None
