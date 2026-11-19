@@ -51,7 +51,13 @@ from fishy.markdown_render import summary_line
 from fishy.models.bone_tree_model import local_time
 from fishy.task_markup import convert_checkboxes
 from fishy.views.markdown_view import MarkdownView
-from fishy.views.tasks import pending_symbols, pick_task, state_menu, task_info_fn
+from fishy.views.tasks import (
+    open_task_editor,
+    pending_symbols,
+    pick_task,
+    state_menu,
+    task_info_fn,
+)
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
@@ -88,6 +94,8 @@ def make_markdown_view(doc: ProjectDocument, auto_height: bool = False, parent=N
     view.taskToggled.connect(lambda t: t in doc.tasks and doc.toggle_task(t))
     view.taskMenuRequested.connect(
         lambda t, pos: t in doc.tasks and state_menu(doc, t, view).exec(pos))
+    view.taskClicked.connect(
+        lambda t: t in doc.tasks and open_task_editor(doc, t, view))
     doc.tasksChanged.connect(view.rerender)
     return view
 

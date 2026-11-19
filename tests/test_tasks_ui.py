@@ -137,3 +137,62 @@ def test_task_states_tab_reports_done_rule(qtbot, doc):
     tab.role.activated.emit(tab.role.currentIndex())
     assert errors and "must count as done" in errors[0]
     assert tab.role.currentData() == "done"  # reverted on screen
+
+
+def test_task_editor_edits_fields(qtbot, doc_with_cause):
+    from PySide6.QtCore import QDate
+
+    from fishy.views.tasks import TaskEditor
+
+    doc, cause = doc_with_cause
+    t = doc.add_task("x", [cause])
+    ed = TaskEditor(doc, t)
+    qtbot.addWidget(ed)
+    ed.assignee.setEditText("  A. Lee ")
+    ed.assignee.lineEdit().editingFinished.emit()
+    ed.no_due.setChecked(False)
+    ed.due.setDate(QDate(2026, 11, 24))
+    ed.critical.setChecked(True)
+    ed.title.setText("")
+    ed.title.editingFinished.emit()
+    task = doc.tasks[t]
+    assert (task.assignee, task.due_date, task.critical, task.title) == \
+        ("A. Lee", "2026-11-24", True, "x")
+    assert ed.title.text() == "x"
+    ed.no_due.setChecked(True)
+    assert doc.tasks[t].due_date is None
+
+
+def test_task_editor_state_notes_links_refs(qtbot, doc_with_cause, monkeypatch):
+    from fishy.views import tasks as tasks_view
+    from fishy.views.tasks import TaskEditor
+
+    doc, cause = doc_with_cause
+    cat = doc.tree.roots()[0]
+    t = doc.add_task("x", [cause])
+    doc.add_log_entry(cause, f"see [[task:{t}]]")
+    ed = TaskEditor(doc, t)
+    qtbot.addWidget(ed)
+    assert ed.refs.count() == 1 and ed.bones.count() == 1
+    ed.state.setCurrentIndex(1)
+    ed.state.activated.emit(1)
+    assert doc.tasks[t].state_id == doc.ordered_task_states()[1].id
+    ed.notes.setPlainText("some notes")
+    ed.commit_notes()
+    assert doc.tasks[t].notes == "some notes"
+    monkeypatch.setattr(tasks_view, "_pick_bone", lambda *a, **k: cat)
+    ed.add_bone_btn.click()
+    assert sorted(doc.tasks[t].bone_ids) == sorted([cause, cat]) and ed.bones.count() == 2
+    ed.bones.setCurrentRow(0)
+    ed.remove_bone_btn.click()
+    assert len(doc.tasks[t].bone_ids) == 1
+
+
+def test_task_editor_closes_when_task_deleted(qtbot, doc):
+    from fishy.views.tasks import _open_editors, open_task_editor
+
+    t = doc.add_task("x")
+    ed = open_task_editor(doc, t, None)  # deletes itself on close
+    assert open_task_editor(doc, t, None) is ed  # one editor per task
+    doc.delete_task(t)
+    assert (id(doc), t) not in _open_editors
