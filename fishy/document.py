@@ -84,8 +84,10 @@ class ProjectDocument(QObject):
     @classmethod
     def create(cls, path: str | Path, name: str, problem: str = "", template: str = "6M",
                display_name: str | None = None,
-               levels: list[dict] | None = None) -> ProjectDocument:
-        return cls(Repository.create(path, name, problem, template, display_name, levels))
+               levels: list[dict] | None = None,
+               style_preset: str = "Default") -> ProjectDocument:
+        return cls(Repository.create(path, name, problem, template, display_name, levels,
+                                     style_preset=style_preset))
 
     @classmethod
     def open(cls, path: str | Path, display_name: str | None = None) -> ProjectDocument:

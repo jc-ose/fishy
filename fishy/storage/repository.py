@@ -107,7 +107,8 @@ class Repository:
     @classmethod
     def create(cls, path: str | Path, name: str, problem: str = "", template: str = "6M",
                display_name: str | None = None, levels: list[dict] | None = None,
-               statuses: list[dict] | None = None) -> Repository:
+               statuses: list[dict] | None = None,
+               style_preset: str = "Default") -> Repository:
         """Create a project file. `levels` / `statuses` override the built-in defaults
         (FR-3.6 templates); each is a list of dicts like `DEFAULT_LEVELS`."""
         path = Path(path)
@@ -119,9 +120,9 @@ class Repository:
         with repo.tx():
             ts, uid = now_utc(), repo.user_id
             repo.conn.execute(
-                "INSERT INTO project (id, name, problem_statement, created_at, updated_at, "
-                "created_by, updated_by) VALUES (1, ?, ?, ?, ?, ?, ?)",
-                (name, problem, ts, ts, uid, uid))
+                "INSERT INTO project (id, name, problem_statement, style_preset, created_at, "
+                "updated_at, created_by, updated_by) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+                (name, problem, style_preset, ts, ts, uid, uid))
             for i, lv in enumerate(levels or DEFAULT_LEVELS):
                 repo.conn.execute(
                     "INSERT INTO level (name, color, definition, sort_order, is_default, "

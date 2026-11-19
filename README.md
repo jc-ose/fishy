@@ -20,8 +20,12 @@ See [requirements.md](requirements.md) for the full specification.
 - **Milestone 6, export: done.** PNG, SVG and PDF with a live preview, an optional title
   block, legend and status toggles, PDF page size and orientation, "fully expanded", copy to
   clipboard, plus the bone outline as text and the whole project as JSON.
-- **Light and dark themes** (brought forward from milestone 7). Follows the Windows setting by
-  default and switches live; **Theme** on the second toolbar forces Light or Dark.
+- **Milestone 7, polish: done.** Filter by text, level and status (the diagram fades the
+  rest); light and dark themes; a Settings dialog (your name, theme, new-project defaults);
+  recent projects; and a warning when a project is already open somewhere else.
+
+All v1 milestones are complete. Next candidates (see requirements §1.2): packaging as an
+installer, a full investigation report, status roll-up rules.
 
 ## Setup
 
@@ -52,8 +56,10 @@ Keys in the tree (when not typing in a cell):
 | Delete | Delete (asks if it has sub-causes or evidence) |
 | + / − | Expand / collapse |
 
-Window-wide shortcuts: Ctrl+Z / Ctrl+Y undo/redo · Ctrl+F find · Ctrl+1 diagram only ·
-Ctrl+2 editor only · Ctrl+3 both · Ctrl+0 fit diagram · Ctrl+E zoom to selection.
+Window-wide shortcuts: Ctrl+Z / Ctrl+Y undo/redo · Ctrl+F find · Ctrl+Shift+F filter ·
+Ctrl+1 diagram only · Ctrl+2 editor only · Ctrl+3 both · Ctrl+0 fit diagram ·
+Ctrl+E zoom to selection · Ctrl+Shift+E export · Ctrl+Shift+C copy diagram image ·
+Ctrl+, settings.
 
 Other ways to edit:
 - Double-click the Level or Status cell to get a named, color-coded dropdown. Choosing a
@@ -123,6 +129,30 @@ has the rest.
   base64), plus computed numbers and rolled-up levels. For interchange and backup; v1 has no
   import.
 
+### Filter
+
+**Filter** (first toolbar, Ctrl+Shift+F) shows only bones with chosen levels, statuses, or
+text in their title, number or description. Any ticked item in a list matches; text, levels
+and statuses must all match. Levels are the ones shown on the diagram, so rolled-up levels
+count; categories have no status, so a status filter shows them only as context.
+
+Matches show normally and their parents stay visible in grey; everything else is hidden in
+the grid and faded on the diagram. The filter follows your edits (set a bone to Blocked and it
+appears), the bone you're working on stays visible until you move off it, and **✕** clears
+it. Exports ignore the filter, and it isn't saved with the project.
+
+### Settings, recent projects, and files open twice
+
+- **Settings…** (Ctrl+,): your name (stamped on your changes; defaults to your Windows
+  account), theme, and for new projects the category template, diagram style, and whether
+  to use your saved level set or the built-in one. These are settings for this computer,
+  not the project.
+- **Open ▾** lists the last 8 projects; missing ones are greyed out.
+- While a project is open, fishy keeps a hidden `name.fishy.lock` file beside it. Opening
+  the same project in a second window, a second copy of fishy, or from another computer on
+  a shared drive warns you first, and you can still open it anyway. A lock left by a crash is
+  cleared automatically on the same computer.
+
 ## Code layout
 
 ```
@@ -146,17 +176,22 @@ fishy/
     markdown_view.py   # QTextBrowser that renders entries and loads project images
   markdown_render.py   # Markdown -> HTML (tables, task lists, Pygments, bone links); no Qt
   theme.py             # light/dark palettes + stylesheet; follows the OS setting
+  filtering.py         # filter rules (text / level / status), no Qt
+  project_lock.py      # "already open elsewhere" lock file (FR-7.7)
   export/
     diagram.py         # off-screen export scene, title block, PNG/SVG/PDF/clipboard rendering
     data.py            # outline text and project JSON
   views/export_dialog.py  # export dialog with live preview
+  views/filter_panel.py   # filter drop-down
+  views/settings_dialog.py  # Settings (UI-8)
   app.py               # main window: panes, toolbars, selection sync, context menus
   demo.py              # milestone 1 layout demo
   samples.py           # sample investigations
-tests/                 # 150 tests: layout geometry, storage + migrations, undo fuzzing,
+tests/                 # 172 tests: layout geometry, storage + migrations, undo fuzzing,
                        #   Qt model checks, keyboard editing, drag-and-drop, details panel,
                        #   levels & statuses editor, legend, exports, markdown, evidence,
-                       #   theme contrast and live switching, exports
+                       #   theme contrast and live switching, exports, filter, settings,
+                       #   recent projects, locking
 ```
 
 ### Data flow

@@ -66,6 +66,8 @@ class BoneTreeModel(QAbstractItemModel):
         # Set by the UI: asked before a drop converts a bone between category and
         # cause (FR-1a.2). Receives (bone_id, new_kind); returns True to proceed.
         self.confirm_kind_change: Callable[[int, str], bool] | None = None
+        # Ancestors kept visible only as context for filter matches (UI-7): drawn muted.
+        self.filter_context: frozenset[int] = frozenset()
 
     # ----- structure ----------------------------------------------------- #
 
@@ -179,6 +181,8 @@ class BoneTreeModel(QAbstractItemModel):
                 st = doc.statuses.get(bone.status_id)  # type: ignore[arg-type]
                 return QColor(st.color) if st else None
 
+        if role == Qt.ItemDataRole.ForegroundRole and bid in self.filter_context:
+            return QColor(theme.current().placeholder)
         if role == Qt.ItemDataRole.ForegroundRole and col in (Col.LEVEL, Col.UPDATED):
             if col is Col.UPDATED or doc.level_is_derived(bid):
                 return QColor(theme.current().muted)

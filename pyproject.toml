@@ -1,6 +1,6 @@
 [project]
 name = "fishy"
-version = "0.6.0"
+version = "1.0.0"
 description = "Root-cause analysis with an auto-generated, always-in-sync fishbone diagram"
 readme = "README.md"
 requires-python = ">=3.15"

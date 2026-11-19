@@ -113,6 +113,7 @@ def draw_pin(painter: QPainter, r: QRectF, color: QColor) -> None:
 class BoneLineItem(QGraphicsLineItem):
     def __init__(self, line: Line) -> None:
         super().__init__(line.x1, line.y1, line.x2, line.y2)
+        self.spec = line  # not `line`: QGraphicsLineItem.line() is a method
         pen = QPen(_faded(line.color, line.dimmed), LINE_WIDTHS[line.kind])
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         if line.dimmed:
@@ -228,6 +229,7 @@ class DiagramScene(QGraphicsScene):
         self._labels: dict[int, LabelItem] = {}
         self.legend_item = None
         self._muted = False
+        self._filter = None  # FilterResult | None (UI-7)
         self.selectionChanged.connect(self._on_selection_changed)
 
     def set_diagram(self, diagram: Diagram, legend=None, legend_position: str = "bottom-left"
@@ -257,6 +259,27 @@ class DiagramScene(QGraphicsScene):
         self._muted = False
         if selected is not None:
             self.select_bone(selected)
+        self._apply_filter()
+
+    # ----- filter (UI-7) --------------------------------------------------- #
+
+    FILTER_OPACITY = {"match": 1.0, "context": 0.55, "out": 0.14}
+
+    def set_filter(self, result) -> None:
+        """Dim bones outside a `FilterResult` (None shows everything). No relayout."""
+        self._filter = result
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        for item in self.items():
+            if isinstance(item, LabelItem):
+                bone_id = item.label.bone_id
+            elif isinstance(item, BoneLineItem):
+                bone_id = item.spec.bone_id
+            else:
+                continue
+            state = self._filter.state(bone_id) if self._filter else "match"
+            item.setOpacity(self.FILTER_OPACITY[state])
 
     def selected_bone(self) -> int | None:
         for item in self.selectedItems():

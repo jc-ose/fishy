@@ -112,6 +112,33 @@ class BoneTreeView(QTreeView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.setAllColumnsShowFocus(True)
 
+    def apply_filter(self, result) -> None:
+        """Hide rows outside a `FilterResult` (None shows all) (UI-7).
+
+        Matches show normally; their ancestors stay as muted context, expanded so
+        the matches can be seen. The model itself is untouched, so editing,
+        drag-and-drop and undo work exactly as without a filter.
+        """
+        model = self.model()
+        if model is None:
+            return
+        doc = model.doc
+        visible = result.visible if result else None
+        model.filter_context = result.context if result else frozenset()
+
+        def walk(parent_id, parent_index) -> None:
+            for row, bid in enumerate(doc.tree.kids(parent_id)):
+                hidden = visible is not None and bid not in visible
+                if self.isRowHidden(row, parent_index) != hidden:
+                    self.setRowHidden(row, parent_index, hidden)
+                index = model.index_for(bid)
+                if result and bid in result.context:
+                    self.expand(index)
+                walk(bid, index)
+
+        walk(None, QModelIndex())
+        self.viewport().update()
+
     def attach(self, doc: ProjectDocument) -> None:
         self.setModel(doc.model)
         self.setItemDelegateForColumn(Col.LEVEL, ChoiceDelegate(doc, "level", self))

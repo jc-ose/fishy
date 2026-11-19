@@ -1,13 +1,13 @@
 # App: fishy (name may change)
 
-> Status: **Draft v0.11** — v0.3 added decisions on Status, log entries, theming and layout;
+> Status: **v1 complete (v0.12)** — v0.3 added decisions on Status, log entries, theming and layout;
 > v0.4 added level roll-up, categories, user identity, sizing, platform and scope decisions;
 > v0.5 settled category logs, level pinning and parent status (§11.1); v0.6 recorded
 > implementation decisions from milestones 1–2 (§10.1); v0.7 added the agreed keyboard map
 > (UI-6) and diagram reading order (FR-2.2); v0.8 recorded milestone 4 (schema v2, legend,
 > markers); v0.9 records milestone 5 (evidence log; FR-1.3, §4.5, §10.1, §12); v0.10 records
-> light/dark theming, done early (UI-1, §10.1); v0.11 records milestone 6 (export; §4.8, §10.1).
-> Items marked
+> light/dark theming, done early (UI-1, §10.1); v0.11 records milestone 6 (export; §4.8, §10.1);
+> v0.12 records milestone 7 (filter, settings, recent files, open-twice warning). Items marked
 > **[Proposed]** are minor suggestions that can be confirmed during implementation.
 
 ---
@@ -146,8 +146,8 @@ The app provides two primary interfaces that always stay in sync:
 - **FR-7.3** Images are stored as BLOBs inside the file, so a project is one portable file that can be emailed.
 - **FR-7.4** The schema has a version number and forward migrations. Opening an older file migrates it after making a backup copy.
 - **FR-7.5** Undo/redo (Ctrl+Z / Ctrl+Y) for all edits within a session. Each undo step is also written through to the database immediately.
-- **FR-7.6** Recent-files list. Reopen the last project on launch. 
-- **FR-7.7** File locking: warn if the same project is already open in another instance.
+- **FR-7.6** Recent-files list. Reopen the last project on launch. *(Done: Open ▾ lists the last 8.)*
+- **FR-7.7** File locking: warn if the same project is already open in another instance. *(Done: a hidden `name.fishy.lock` beside the project; warns, with "Open anyway".)*
 
 ### 4.8 Export
 - **FR-8.1** Export the diagram to **PNG** (configurable DPI/scale), **SVG** (vector) and **PDF** (vector, page size and orientation selectable, fit-to-page).
@@ -178,8 +178,8 @@ The app provides two primary interfaces that always stay in sync:
   | + / − | Expand / collapse (← / → are used for outdent/indent) |
   | Ctrl+F | Find by title |
   | Ctrl+Z / Ctrl+Y | Undo / redo |
-- **UI-7** Filter and search: by text, level and status. Filtered-out bones are dimmed in the diagram. *(Milestone 3 ships Find by title (Ctrl+F); filtering by level/status with diagram dimming is scheduled for milestone 7.)*
-- **UI-8** Settings dialog for theme, default style preset, level templates and the current user's display name.
+- **UI-7** Filter and search: by text, level and status. Filtered-out bones are dimmed in the diagram. *(Done in milestone 7. Find by title (Ctrl+F) jumps; Filter (Ctrl+Shift+F) filters by text, level and status. OR within a list, AND across lists; levels as rolled up; matches' ancestors stay visible in grey; non-matches are hidden in the grid and faded on the diagram; exports ignore the filter.)*
+- **UI-8** Settings dialog for theme, default style preset, level templates and the current user's display name. *(Done; also the default category template.)*
 
 ## 6. Non-Functional Requirements
 
@@ -374,6 +374,15 @@ above in these deliberate ways:
   scales by the output device's DPI, so SVG and PDF are written at the screen's logical 96 dpi
   (still vector) and the PNG DPI is set as metadata only after painting; otherwise text came out
   tiny, huge or clipped. PDFs are one page, scaled to fit and centered.
+- **Filter (milestone 7):** the filter is view-only. The grid hides rows with
+  `QTreeView.setRowHidden` instead of a proxy model, so selection, drag-and-drop, keyboard
+  editing and undo keep working on the real model. It's recomputed after every edit, and the
+  current bone stays visible while you work on it (e.g. one just added with Enter).
+- **Open-twice lock (milestone 7):** `QLockFile` beside the project (hidden on Windows),
+  stale-checked by process id, so a crash on the same computer never blocks reopening. If
+  the folder is read-only, the project opens without a lock.
+- **Settings:** the display name, theme, new-project defaults and level template are app
+  settings (per computer, in the registry); everything about a project stays in its file.
 
 ## 11. Decisions
 
@@ -410,4 +419,4 @@ No open questions. Remaining **[Proposed]** items are minor and can be settled d
 4. ✅ **Levels, statuses & legend** — Level and status configuration UI, level roll-up and pinning, category status summaries, colors, status indicators, legend on the diagram.
 5. ✅ **Evidence log** — Markdown edit/preview, syntax highlighting, image paste/preview.
 6. ✅ **Export** — PNG/SVG/PDF with title block and legend; clipboard; outline text and JSON.
-7. **Polish** — ~~Light/dark theme~~ (done early, after M5: System/Light/Dark, follows Windows live; diagram canvas stays white), filter by level/status (UI-7), settings. (Packaging/installer is future work, NFR-5; v1 runs directly from Python.)
+7. ✅ **Polish** — Light/dark theme (done early, after M5: System/Light/Dark, follows Windows live; diagram canvas stays white), filter by text/level/status (UI-7), Settings (UI-8), recent files (FR-7.6), open-twice warning (FR-7.7). (Packaging/installer is future work, NFR-5; v1 runs directly from Python.)

@@ -9,7 +9,15 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QItemSelectionModel, QModelIndex, QPoint, QSettings, Qt
+from PySide6.QtCore import (
+    QByteArray,
+    QItemSelectionModel,
+    QModelIndex,
+    QPoint,
+    QSettings,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,16 +35,26 @@ from PySide6.QtWidgets import (
     QToolBar,
     QToolButton,
     QWidget,
+    QWidgetAction,
 )
 
 from fishy import theme
 from fishy.document import ProjectDocument
 from fishy.domain import CATEGORY_TEMPLATES, StatusRole
+from fishy.filtering import BoneFilter, FilterResult, apply_filter
 from fishy.layout import PRESETS, LayoutNode, layout_fishbone
+from fishy.project_lock import ProjectLock
 from fishy.storage import PROJECT_SUFFIX, Repository
 from fishy.views.bone_tree_view import BoneTreeView, swatch
 from fishy.views.details_panel import DetailsPanel
 from fishy.views.diagram_view import DiagramScene, DiagramView, qt_measure
+from fishy.views.filter_panel import FilterPanel
+from fishy.views.settings_dialog import (
+    SettingsDialog,
+    display_name,
+    new_project_style,
+    new_project_template,
+)
 
 FILE_FILTER = f"fishy project (*{PROJECT_SUFFIX})"
 
@@ -45,6 +63,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
         self.doc: ProjectDocument | None = None
+        self._lock: ProjectLock | None = None  # FR-7.7
         self.measure = qt_measure()
         self.settings = settings or QSettings("fishy", "fishy")
         self.resize(1440, 920)
@@ -115,7 +134,15 @@ class MainWindow(QMainWindow):
         bar.addAction(self._act("New…", self.new_project, "Ctrl+N"))
         bar.addAction(self._act("New sample…", self.new_sample,
                                 tip="Create a project pre-filled with an example"))
-        bar.addAction(self._act("Open…", self.open_project, "Ctrl+O"))
+        self.open_act = self._act("Open…", lambda: self.open_project(), "Ctrl+O")
+        self.recent_menu = QMenu(self)
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        open_button = QToolButton()
+        open_button.setDefaultAction(self.open_act)
+        open_button.setMenu(self.recent_menu)
+        open_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        open_button.setToolTip("Open a project (Ctrl+O); the arrow lists recent projects")
+        bar.addWidget(open_button)
         self.copy_act = self._act("Save copy…", self.save_copy,
                                   tip="Write a copy of this project to another file")
         bar.addAction(self.copy_act)
@@ -176,9 +203,41 @@ class MainWindow(QMainWindow):
         find_act.triggered.connect(lambda: (self.find_box.setFocus(), self.find_box.selectAll()))
         self.addAction(find_act)
 
+        # Filter (UI-7): a drop-down panel; ticking boxes doesn't close it.
+        self.bone_filter = BoneFilter()
+        self.filter_result = None
+        self.filter_panel = FilterPanel()
+        self.filter_panel.filterChanged.connect(self._filter_changed)
+        filter_menu = QMenu(self)
+        panel_act = QWidgetAction(filter_menu)
+        panel_act.setDefaultWidget(self.filter_panel)
+        filter_menu.addAction(panel_act)
+        filter_menu.aboutToShow.connect(lambda: QTimer.singleShot(
+            0, self.filter_panel.text.setFocus))
+        self.filter_button = QToolButton()
+        self.filter_button.setText("Filter")
+        self.filter_button.setToolTip("Show only bones with a given level, status or text "
+                                      "(Ctrl+Shift+F)")
+        self.filter_button.setMenu(filter_menu)
+        self.filter_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_button.setCheckable(True)
+        bar.addWidget(self.filter_button)
+        filter_act = QAction(self)
+        filter_act.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        filter_act.triggered.connect(self.filter_button.showMenu)
+        self.addAction(filter_act)
+        clear_act = self._act("✕", lambda: self.filter_panel.clear(),
+                              tip="Clear the filter and show every bone")
+        self.clear_filter_act = clear_act
+        clear_act.setVisible(False)
+        bar.addAction(clear_act)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bar.addWidget(spacer)
+        bar.addAction(self._act("Settings…", self.edit_settings, "Ctrl+,",
+                                tip="Your name, theme, and defaults for new projects"))
+        bar.addSeparator()
         # Pane layout (UI-2): show both, or maximize either pane.
         self.pane_group = QActionGroup(self)
         self.pane_actions = {}
@@ -202,7 +261,7 @@ class MainWindow(QMainWindow):
         bar2.addWidget(QLabel(" Problem: "))
         self.problem_edit = QLineEdit()
         self.problem_edit.setPlaceholderText("The effect being investigated (shown in the head)")
-        self.problem_edit.setMinimumWidth(420)
+        self.problem_edit.setMinimumWidth(340)
         self.problem_edit.editingFinished.connect(self._problem_edited)
         bar2.addWidget(self.problem_edit)
         bar2.addSeparator()
@@ -298,11 +357,14 @@ class MainWindow(QMainWindow):
     # Document lifecycle
     # ===================================================================== #
 
-    def _set_doc(self, doc: ProjectDocument | None) -> None:
+    def _set_doc(self, doc: ProjectDocument | None, lock: ProjectLock | None = None) -> None:
         if self.doc is not None:
             self.details.set_document(None)
             self.doc.close()
             self.doc.deleteLater()
+        if self._lock is not None:
+            self._lock.release()
+        self._lock = lock
         self.doc = doc
         enabled = doc is not None
         if self.timeline is not None:
@@ -311,8 +373,13 @@ class MainWindow(QMainWindow):
         for act in [*self.edit_actions, *self.export_actions, self.copy_act, self.rollup_act,
                     self.status_act, self.legend_act, self.choices_act, self.timeline_act]:
             act.setEnabled(enabled)
-        for w in (self.problem_edit, self.style_box, self.find_box, self.tree, self.legend_pos):
+        for w in (self.problem_edit, self.style_box, self.find_box, self.tree, self.legend_pos,
+                  self.filter_button):
             w.setEnabled(enabled)
+        self.bone_filter = BoneFilter()
+        self.filter_result = None
+        self.filter_panel.set_document(doc)
+        self._update_filter_widgets()
         self.undo_act.setEnabled(False)
         self.redo_act.setEnabled(False)
         if doc is None:
@@ -335,6 +402,8 @@ class MainWindow(QMainWindow):
         # Bound methods (not lambdas): Qt drops these when either side is destroyed.
         doc.changed.connect(self.relayout)
         doc.changed.connect(self._update_progress)
+        doc.changed.connect(self._reapply_filter)
+        doc.choicesChanged.connect(self.filter_panel.rebuild)
         doc.projectChanged.connect(self._sync_project_widgets)
         doc.error.connect(self._show_error)
         doc.undo_stack.canUndoChanged.connect(self.undo_act.setEnabled)
@@ -342,9 +411,9 @@ class MainWindow(QMainWindow):
         doc.undo_stack.undoTextChanged.connect(self._undo_text)
         doc.undo_stack.redoTextChanged.connect(self._redo_text)
 
-        user = doc.repo.users()[doc.repo.user_id].display_name
-        self.user_label.setText(f"  User: {user} ")
+        self._show_user()
         self.settings.setValue("last_project", str(doc.path))
+        self._remember_recent(doc.path)
         self._sync_project_widgets()
         self.relayout()
         self._update_progress()
@@ -368,8 +437,10 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "New project", "Project name:")
         if not ok or not name.strip():
             return
-        template, ok = QInputDialog.getItem(self, "New project", "Category template:",
-                                            list(CATEGORY_TEMPLATES), 0, False)
+        templates = list(CATEGORY_TEMPLATES)
+        template, ok = QInputDialog.getItem(
+            self, "New project", "Category template:", templates,
+            templates.index(new_project_template(self.settings)), False)
         if not ok:
             return
         path = self._ask_path("Create project")
@@ -377,25 +448,119 @@ class MainWindow(QMainWindow):
             from fishy.views.choices_dialog import saved_level_template
 
             levels = saved_level_template(self.settings)  # FR-3.6
-            self._set_doc(ProjectDocument.create(path, name.strip(), "", template,
-                                                 levels=levels))
+            lock = self._claim(path)
+            self._set_doc(ProjectDocument.create(
+                path, name.strip(), "", template, display_name(self.settings), levels,
+                style_preset=new_project_style(self.settings)), lock or None)
 
     def new_sample(self) -> None:
         path = self._ask_path("Create sample project")
         if path:
-            self._set_doc(create_sample_project(path))
+            lock = self._claim(path)
+            self._set_doc(create_sample_project(path, display_name(self.settings)),
+                          lock or None)
 
-    def open_project(self, path: str | None = None) -> None:
+    def open_project(self, path: str | Path | None = None) -> bool:
         if not path:
-            path, _ = QFileDialog.getOpenFileName(self, "Open project", "", FILE_FILTER)
+            folder = str(Path(self.doc.path).parent) if self.doc else ""
+            path, _ = QFileDialog.getOpenFileName(self, "Open project", folder, FILE_FILTER)
         if not path:
-            return
+            return False
+        if self.doc is not None and Path(path).resolve() == Path(self.doc.path).resolve():
+            self.statusBar().showMessage("That project is already open here.", 4000)
+            return True
+        lock = self._claim(path)
+        if lock is False:
+            return False
         try:
-            doc = ProjectDocument.open(path)
+            doc = ProjectDocument.open(path, display_name(self.settings))
         except Exception as exc:  # show any open failure to the user
+            if lock:
+                lock.release()
+            if isinstance(exc, FileNotFoundError):
+                self._forget_recent(path)
             QMessageBox.critical(self, "Can't open project", str(exc))
+            return False
+        self._set_doc(doc, lock or None)
+        return True
+
+    # ----- already open elsewhere (FR-7.7) -------------------------------- #
+
+    def _claim(self, path: str | Path) -> ProjectLock | None | bool:
+        """Lock `path`. Returns the lock, None to open without one, or False to cancel."""
+        lock = ProjectLock(path)
+        if lock.acquire():
+            return lock
+        holder = lock.holder()
+        where = holder.describe() if holder else "somewhere else"
+        return None if self._ask_open_anyway(Path(path).name, where) else False
+
+    def _ask_open_anyway(self, name: str, where: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Warning, "Project already open",
+                          f"“{name}” is already open {where}.", parent=self)
+        box.setInformativeText(
+            "If it's open in two places at once, each shows out-of-date information and "
+            "changes can overwrite each other. Close it there first if you can.\n\n"
+            "If fishy crashed on another computer, it's safe to open anyway.")
+        anyway = box.addButton("Open anyway", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is anyway
+
+    # ----- recent projects (FR-7.6) --------------------------------------- #
+
+    RECENT_KEY = "recent_projects"
+    RECENT_MAX = 8
+
+    def recent_projects(self) -> list[str]:
+        value = self.settings.value(self.RECENT_KEY, [])
+        if isinstance(value, str):  # QSettings returns a 1-item list as a string
+            value = [value] if value else []
+        return [str(v) for v in (value or [])]
+
+    def _remember_recent(self, path) -> None:
+        path = str(Path(path).resolve())
+        items = [p for p in self.recent_projects()
+                 if Path(p).resolve() != Path(path)]
+        self.settings.setValue(self.RECENT_KEY, [path, *items][: self.RECENT_MAX])
+
+    def _forget_recent(self, path) -> None:
+        self.settings.setValue(self.RECENT_KEY, [
+            p for p in self.recent_projects() if Path(p).resolve() != Path(path).resolve()])
+
+    def _fill_recent_menu(self) -> None:
+        menu = self.recent_menu
+        menu.clear()
+        items = self.recent_projects()
+        if not items:
+            menu.addAction("No recent projects").setEnabled(False)
             return
-        self._set_doc(doc)
+        for i, path in enumerate(items, start=1):
+            p = Path(path)
+            label = f"&{i}  {p.stem}" if i < 10 else p.stem
+            act = menu.addAction(f"{label}    —  {p.parent}")
+            act.setToolTip(path)
+            if p.exists():
+                act.triggered.connect(lambda _=False, x=path: self.open_project(x))
+            else:
+                act.setText(f"{label}  (missing)    —  {p.parent}")
+                act.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Clear recent projects",
+                       lambda: self.settings.setValue(self.RECENT_KEY, []))
+
+    # ----- settings (UI-8) ------------------------------------------------- #
+
+    def edit_settings(self) -> None:
+        dlg = SettingsDialog(self.settings, self)
+        if dlg.exec() and self.doc is not None:
+            self.doc.repo.set_user(display_name(self.settings))
+            self._show_user()
+
+    def _show_user(self) -> None:
+        user = self.doc.repo.users()[self.doc.repo.user_id].display_name
+        self.user_label.setText(f"  User: {user} ")
 
     def save_copy(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Save a copy", "", FILE_FILTER)
@@ -593,6 +758,10 @@ class MainWindow(QMainWindow):
     def _tree_current_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
         bone = self.tree.current_bone()
         self.details.show_bone(bone)
+        if self.filter_result is not None:
+            # A bone kept visible only because it was current drops out once you move on;
+            # a faded bone picked on the diagram is shown. Deferred: not mid-selection.
+            QTimer.singleShot(0, self, self._reapply_filter)  # dropped if the window closes
         item = self.scene.select_bone(bone)
         if item is not None and self.view.isVisible():
             self.view.ensureVisible(item, 40, 40)
@@ -769,6 +938,48 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"No bone matches “{self.find_box.text()}”", 3000)
 
     # ===================================================================== #
+    # Filter (UI-7)
+    # ===================================================================== #
+
+    def _filter_changed(self, f: BoneFilter) -> None:
+        self.bone_filter = f
+        self._reapply_filter()
+        if self.filter_result is not None:
+            shown = len(self.filter_result.matches)
+            self.statusBar().showMessage(
+                f"Filter: {self.bone_filter.describe(self.doc)} — {shown} of "
+                f"{self.filter_result.total} bones match", 5000)
+
+    def _reapply_filter(self) -> None:
+        """Recompute after any edit: levels roll up, statuses change, bones move."""
+        if self.doc is None:
+            return
+        result = apply_filter(self.doc, self.bone_filter)
+        current = self.tree.current_bone()
+        if result is not None and current is not None and current in self.doc.tree.bones \
+                and current not in result.visible:
+            # Keep the bone being worked on visible (e.g. one just added with Enter),
+            # with its parents as context, until the selection moves on.
+            context, parent = set(result.context), self.doc.tree.bones[current].parent_id
+            while parent is not None:
+                if parent not in result.matches:
+                    context.add(parent)
+                parent = self.doc.tree.bones[parent].parent_id
+            result = FilterResult(result.matches | {current}, frozenset(context), result.total)
+        self.filter_result = result
+        self.scene.set_filter(result)
+        self.tree.apply_filter(result)
+        self._update_filter_widgets()
+
+    def _update_filter_widgets(self) -> None:
+        r = self.filter_result
+        active = r is not None
+        self.filter_button.setChecked(active)
+        self.filter_button.setText(f"Filter: {len(r.matches)} of {r.total}" if active
+                                   else "Filter")
+        self.clear_filter_act.setVisible(active)
+
+    # ===================================================================== #
     # Theme (UI-1)
     # ===================================================================== #
 
@@ -788,12 +999,13 @@ class MainWindow(QMainWindow):
             self.theme_box.setCurrentIndex(index)
 
 
-def create_sample_project(path: str | Path) -> ProjectDocument:
+def create_sample_project(path: str | Path, display_name: str | None = None
+                          ) -> ProjectDocument:
     """A project file pre-filled with the 26-bone sample investigation."""
     from fishy.samples import STATUSES, typical
 
     problem, cats = typical()
-    repo = Repository.create(path, "Line 3 seal failures", problem, "Blank")
+    repo = Repository.create(path, "Line 3 seal failures", problem, "Blank", display_name)
     levels = {lv.name: lv.id for lv in repo.levels()}
     statuses = {st.name: st.id for st in repo.statuses()}
     status_by_color = {color: statuses[name] for name, color in STATUSES.items()}
