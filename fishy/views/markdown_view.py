@@ -12,12 +12,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QTextDocument
 from PySide6.QtWidgets import QFrame, QSizePolicy, QTextBrowser
 
 from fishy import theme
-from fishy.markdown_render import ATTACHMENT_SCHEME, BONE_SCHEME, BoneLabel, render, stylesheet
+from fishy.markdown_render import (
+    ATTACHMENT_SCHEME,
+    BONE_SCHEME,
+    TASK_SCHEME,
+    TASK_TOGGLE_SCHEME,
+    BoneLabel,
+    TaskLabel,
+    render,
+    stylesheet,
+)
 
 AttachmentLoader = Callable[[int], bytes | None]
 MAX_PREVIEW_WIDTH = 560
@@ -26,11 +35,16 @@ MAX_PREVIEW_WIDTH = 560
 class MarkdownView(QTextBrowser):
     imageClicked = Signal(int)  # attachment id
     boneClicked = Signal(int)  # bone id
+    taskClicked = Signal(int)  # task id (its title was clicked)
+    taskToggled = Signal(int)  # task id (its checkbox symbol was clicked)
+    taskMenuRequested = Signal(int, QPoint)  # task id, global position
 
     def __init__(self, parent=None, auto_height: bool = False) -> None:
         super().__init__(parent)
         self.load_attachment: AttachmentLoader | None = None
         self.bone_label: BoneLabel | None = None
+        self.task_label: TaskLabel | None = None
+        self.pending_symbols: tuple[str, str] = ("☐", "☑")
         self.auto_height = auto_height
         self._markdown = ""
         self.setOpenLinks(False)
@@ -55,8 +69,13 @@ class MarkdownView(QTextBrowser):
         self.document().clear()
         dark = theme.current().dark
         self.document().setDefaultStyleSheet(stylesheet(dark))
-        self.setHtml(render(self._markdown, self.bone_label, dark))
+        self.setHtml(render(self._markdown, self.bone_label, dark, self.task_label,
+                            self.pending_symbols))
         self._fit_height()
+
+    def rerender(self, *_args) -> None:
+        """Render the same markdown again (e.g. after a referenced task changed)."""
+        self.set_markdown(self._markdown)
 
     def _theme_changed(self) -> None:
         self.set_markdown(self._markdown)
@@ -104,10 +123,23 @@ class MarkdownView(QTextBrowser):
                 self.imageClicked.emit(int(url.path()))
             elif scheme == BONE_SCHEME:
                 self.boneClicked.emit(int(url.path()))
+            elif scheme == TASK_TOGGLE_SCHEME:
+                self.taskToggled.emit(int(url.path()))
+            elif scheme == TASK_SCHEME:
+                self.taskClicked.emit(int(url.path()))
             elif scheme in ("http", "https", "mailto"):
                 QDesktopServices.openUrl(url)
         except ValueError:
             pass
+
+    def contextMenuEvent(self, e) -> None:
+        href = self.anchorAt(e.pos())
+        scheme, _, rest = href.partition(":")
+        if scheme in (TASK_SCHEME, TASK_TOGGLE_SCHEME) and rest.isdigit():
+            self.taskMenuRequested.emit(int(rest), e.globalPos())
+            e.accept()
+            return
+        super().contextMenuEvent(e)
 
     # ----- auto height ----------------------------------------------------- #
 

@@ -49,7 +49,9 @@ from fishy.document import ProjectDocument
 from fishy.domain import LogEntry
 from fishy.markdown_render import summary_line
 from fishy.models.bone_tree_model import local_time
+from fishy.task_markup import convert_checkboxes
 from fishy.views.markdown_view import MarkdownView
+from fishy.views.tasks import pending_symbols, pick_task, state_menu, task_info_fn
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
@@ -80,8 +82,25 @@ def make_markdown_view(doc: ProjectDocument, auto_height: bool = False, parent=N
     view = MarkdownView(parent, auto_height=auto_height)
     view.load_attachment = attachment_loader(doc)
     view.bone_label = bone_label_fn(doc)
+    view.task_label = task_info_fn(doc)
+    view.pending_symbols = pending_symbols(doc)
     view.imageClicked.connect(lambda att: ImageViewer(doc, att, view.window()).exec())
+    view.taskToggled.connect(lambda t: t in doc.tasks and doc.toggle_task(t))
+    view.taskMenuRequested.connect(
+        lambda t, pos: t in doc.tasks and state_menu(doc, t, view).exec(pos))
+    doc.tasksChanged.connect(view.rerender)
     return view
+
+
+def pick_bone(doc: ProjectDocument, parent, exclude: set[int] = frozenset()) -> int | None:
+    """Let the user choose a bone by number and title; None if cancelled."""
+    label = bone_label_fn(doc)
+    ids = [b for b in doc.tree.walk() if b not in exclude]
+    if not ids:
+        return None
+    names = [label(b) for b in ids]
+    choice, ok = QInputDialog.getItem(parent, "Choose a bone", "Bone:", names, 0, False)
+    return ids[names.index(choice)] if ok else None
 
 
 # =========================================================================== #
@@ -155,6 +174,8 @@ class EntryEditor(QDialog):
     """Add or edit one evidence entry, with live preview (FR-5.5)."""
 
     PREVIEW_DELAY_MS = 250
+    HINT = ("Ctrl+Enter saves. Escape cancels; images and tasks added here are discarded "
+            "if you cancel.")
 
     def __init__(self, doc: ProjectDocument, bone_id: int, entry: LogEntry | None = None,
                  parent=None) -> None:
@@ -189,6 +210,12 @@ class EntryEditor(QDialog):
             "Attach images from disk (you can also paste or drag them in)")
         bar.addAction("Link bone…", self._link_bone).setToolTip(
             "Insert a link to another bone; it always shows that bone's current number")
+        bar.addSeparator()
+        bar.addAction("Convert to task", self.convert_to_task).setToolTip(
+            "Turn the checkbox line under the cursor (or every selected one) into a task, "
+            "created when you save")
+        bar.addAction("Link task…", self._link_task).setToolTip(
+            "Insert a reference to a task; it shows the task's live checkbox and title")
         layout.addWidget(bar)
 
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -207,10 +234,9 @@ class EntryEditor(QDialog):
         split.setSizes([500, 500])
         layout.addWidget(split, 1)
 
-        hint = QLabel("Ctrl+Enter saves. Escape cancels; images added here are discarded "
-                      "if you cancel.")
-        theme.mark(hint, muted=True)
-        layout.addWidget(hint)
+        self.hint = QLabel(self.HINT)
+        theme.mark(self.hint, muted=True)
+        layout.addWidget(self.hint)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                    | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -250,15 +276,38 @@ class EntryEditor(QDialog):
             self.source.insert_image_file(Path(f))
 
     def _link_bone(self) -> None:
-        label = bone_label_fn(self.doc)
-        ids = [b for b in self.doc.tree.walk() if b != self.bone_id]
-        if not ids:
-            return
-        names = [label(b) for b in ids]
-        choice, ok = QInputDialog.getItem(self, "Link bone", "Bone:", names, 0, False)
-        if ok:
-            self.source.insertPlainText(f"[[bone:{ids[names.index(choice)]}]]")
+        bone_id = pick_bone(self.doc, self, exclude={self.bone_id})
+        if bone_id is not None:
+            self.source.insertPlainText(f"[[bone:{bone_id}]]")
             self.source.setFocus()
+
+    def _link_task(self) -> None:
+        first = [t for _, ids in self.doc.task_groups(self.bone_id) for t in ids]
+        task_id = pick_task(self.doc, self, first=first)
+        if task_id is not None:
+            self.source.insertPlainText(f"[[task:{task_id}]]")
+            self.source.setFocus()
+
+    def convert_to_task(self) -> int:
+        """Mark checkbox lines at the cursor/selection as pending tasks (spec §4.9)."""
+        cursor = self.source.textCursor()
+        text, count = convert_checkboxes(self.source.toPlainText(), cursor.selectionStart(),
+                                         cursor.selectionEnd())
+        if not count:
+            self.hint.setText("No checkbox lines here. Put the cursor on a “- [ ]” line.")
+            QTimer.singleShot(4000, lambda: self.hint.setText(self.HINT))
+            return 0
+        pos = cursor.position()
+        doc_cursor = QTextCursor(self.source.document())
+        doc_cursor.select(QTextCursor.SelectionType.Document)
+        doc_cursor.insertText(text)  # one edit, so Ctrl+Z in the editor undoes it
+        cursor = self.source.textCursor()
+        cursor.setPosition(min(pos, len(text)))
+        self.source.setTextCursor(cursor)
+        self.hint.setText(f"{count} line{'s' if count != 1 else ''} will become "
+                          f"task{'s' if count != 1 else ''} when you save.")
+        self.source.setFocus()
+        return count
 
     def _wrap(self, marker: str) -> None:
         cursor = self.source.textCursor()
@@ -408,7 +457,8 @@ class EntryCard(QFrame):
         self.toggle.clicked.connect(lambda: self.collapseToggled.emit(entry.id, not collapsed))
         head.addWidget(self.toggle)
         label = bone_label_fn(doc)
-        title = entry.title or summary_line(entry.body_md, label) or "(empty entry)"
+        tl = task_info_fn(doc)
+        title = entry.title or summary_line(entry.body_md, label, task_label=tl) or "(empty entry)"
         self.title = QLabel(title)
         self.title.setStyleSheet("font-weight: 600;")
         self.title.setWordWrap(True)
@@ -446,7 +496,7 @@ class EntryCard(QFrame):
 
         if collapsed:
             if entry.title:
-                summary = QLabel(summary_line(entry.body_md, label))
+                summary = QLabel(summary_line(entry.body_md, label, task_label=tl))
                 theme.mark(summary, muted=True)
                 summary.setWordWrap(True)
                 layout.addWidget(summary)
@@ -599,8 +649,8 @@ class EvidenceLog(QWidget):
         editor = EntryEditor(self.doc, self.bone_id, parent=self.window())
         if editor.exec() != QDialog.DialogCode.Accepted:
             return None
-        return self.doc.add_log_entry(self.bone_id, editor.body(), editor.entry_title(),
-                                      attachments=editor.new_attachments)
+        return self.doc.save_log_entry(self.bone_id, None, editor.body(),
+                                       editor.entry_title(), editor.new_attachments)
 
     def edit_entry(self, entry_id: int) -> bool:
         if not self.doc:
@@ -609,14 +659,15 @@ class EvidenceLog(QWidget):
         editor = EntryEditor(self.doc, entry.bone_id, entry, parent=self.window())
         if editor.exec() != QDialog.DialogCode.Accepted:
             return False
-        return self.doc.update_log_entry(entry_id, attachments=editor.new_attachments,
-                                         title=editor.entry_title(), body_md=editor.body())
+        return self.doc.save_log_entry(entry.bone_id, entry_id, editor.body(),
+                                       editor.entry_title(), editor.new_attachments) is not None
 
     def delete_entry(self, entry_id: int) -> None:
         if not self.doc:
             return
         entry = self.doc.repo.log_entry(entry_id)
-        name = entry.title or summary_line(entry.body_md) or "this entry"
+        name = (entry.title or summary_line(entry.body_md, task_label=task_info_fn(self.doc))
+                or "this entry")
         if QMessageBox.question(self, "Delete entry",
                                 f"Delete “{name}”?\n\nYou can undo this.") == \
                 QMessageBox.StandardButton.Yes:
@@ -670,11 +721,13 @@ class TimelineDialog(QDialog):
         layout.addWidget(hint)
         doc.logChanged.connect(self.refresh)
         doc.changed.connect(self.refresh)
+        doc.tasksChanged.connect(self.refresh)
         self.refresh()
 
     def refresh(self, *_args) -> None:
         doc = self.doc
         label = bone_label_fn(doc)
+        tl = task_info_fn(doc)
         users = doc.repo.users()
         entries = doc.repo.all_log_entries()
         if self.newest_first.isChecked():
@@ -682,11 +735,11 @@ class TimelineDialog(QDialog):
         self.tree.clear()
         for e in entries:
             author = users[e.created_by].display_name if e.created_by in users else ""
-            text = e.title or summary_line(e.body_md, label) or "(empty entry)"
+            text = e.title or summary_line(e.body_md, label, task_label=tl) or "(empty entry)"
             item = QTreeWidgetItem([local_time(e.created_at), label(e.bone_id) or "",
                                     text, author])
             item.setData(0, Qt.ItemDataRole.UserRole, (e.bone_id, e.id))
-            item.setToolTip(2, summary_line(e.body_md, label, limit=400))
+            item.setToolTip(2, summary_line(e.body_md, label, limit=400, task_label=tl))
             self.tree.addTopLevelItem(item)
         n = len(entries)
         self.count.setText(f"{n} entr{'y' if n == 1 else 'ies'} across "
