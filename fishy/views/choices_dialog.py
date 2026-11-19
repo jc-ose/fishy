@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -47,19 +48,29 @@ ROLE_LABELS = {
 }
 
 
+SYMBOL_SUGGESTIONS = "☐ ◐ ◔ ⊘ ⏸ ☑ ✔ ✖ ★ ?".split()
+HINTS = {"level": "Top = most severe. Order drives level roll-up.",
+         "status": "Order sets how statuses are listed.",
+         "task_state": "Order sets the cycle order (Ctrl+Shift+Enter)."}
+
+
 class _ChoiceTab(QWidget):
-    """List + form editor for one kind of choice ("level" or "status")."""
+    """List + form editor for one kind of choice ("level", "status" or "task_state")."""
 
     def __init__(self, doc: ProjectDocument, kind: str, parent=None) -> None:
         super().__init__(parent)
         self.doc = doc
         self.kind = kind
         self.is_level = kind == "level"
+        self.is_task_state = kind == "task_state"
+        # document methods for this kind: add/update/move/set_default/delete
+        prefix = {"level": "level", "status": "status", "task_state": "task_state"}[kind]
+        self._ops = {op: getattr(doc, f"{op}_{prefix}")
+                     for op in ("update", "move", "set_default", "delete")}
 
         layout = QHBoxLayout(self)
         left = QVBoxLayout()
-        hint = QLabel("Top = most severe. Order drives level roll-up." if self.is_level
-                      else "Order sets how statuses are listed.")
+        hint = QLabel(HINTS[kind])
         theme.mark(hint, muted=True)
         hint.setWordWrap(True)
         left.addWidget(hint)
@@ -86,6 +97,24 @@ class _ChoiceTab(QWidget):
         self.color_btn = QPushButton()
         self.color_btn.clicked.connect(self._pick_color)
         form.addRow("Color", self.color_btn)
+        if self.is_task_state:
+            self.symbol_edit = QLineEdit()
+            self.symbol_edit.setMaxLength(2)
+            self.symbol_edit.setFixedWidth(60)
+            self.symbol_edit.setToolTip("The glyph drawn as this state's checkbox")
+            self.symbol_edit.editingFinished.connect(self._symbol_edited)
+            pick = QToolButton()
+            pick.setText("…")
+            pick.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            for glyph in SYMBOL_SUGGESTIONS:
+                act = QAction(glyph, pick)
+                act.triggered.connect(lambda _=False, g=glyph: self._set_symbol(g))
+                pick.addAction(act)
+            symbol_row = QHBoxLayout()
+            symbol_row.addWidget(self.symbol_edit)
+            symbol_row.addWidget(pick)
+            symbol_row.addStretch(1)
+            form.addRow("Symbol", symbol_row)
         if self.is_level:
             self.definition = _FocusOutPlainTextEdit(self.flush)
             self.definition.setPlaceholderText("Shown in the legend and as a tooltip")
@@ -102,10 +131,14 @@ class _ChoiceTab(QWidget):
             self.role = QComboBox()
             for role, label in ROLE_LABELS.items():
                 self.role.addItem(label, role)
-            self.role.setToolTip("What this status means for progress summaries")
+            self.role.setToolTip("What this means for progress summaries" if not
+                                 self.is_task_state else
+                                 "“Done” states count as complete; clicking a checkbox "
+                                 "toggles between the default and the first done state")
             self.role.activated.connect(self._role_chosen)
             form.addRow("Meaning", self.role)
-        self.default_box = QCheckBox("Default for new causes")
+        self.default_box = QCheckBox("Default for new tasks" if self.is_task_state
+                                     else "Default for new causes")
         self.default_box.toggled.connect(self._default_toggled)
         form.addRow("", self.default_box)
         self.usage = QLabel()
@@ -123,6 +156,8 @@ class _ChoiceTab(QWidget):
     # ----- data helpers --------------------------------------------------- #
 
     def _choices(self):
+        if self.is_task_state:
+            return self.doc.ordered_task_states()
         return self.doc.ordered_levels() if self.is_level else self.doc.ordered_statuses()
 
     def _current(self):
@@ -131,6 +166,8 @@ class _ChoiceTab(QWidget):
         return choices[row] if 0 <= row < len(choices) else None
 
     def _usage_count(self, choice_id: int) -> int:
+        if self.is_task_state:
+            return sum(1 for t in self.doc.tasks.values() if t.state_id == choice_id)
         attr = "level_id" if self.is_level else "status_id"
         return sum(1 for b in self.doc.tree.bones.values() if getattr(b, attr) == choice_id)
 
@@ -179,8 +216,11 @@ class _ChoiceTab(QWidget):
             self.eliminated.blockSignals(False)
         else:
             self.role.setCurrentIndex(self.role.findData(ch.role))
+        if self.is_task_state:
+            self.symbol_edit.setText(ch.symbol)
         n = self._usage_count(ch.id)
-        self.usage.setText(f"Used by {n} cause{'s' if n != 1 else ''}"
+        noun = "task" if self.is_task_state else "cause"
+        self.usage.setText(f"Used by {n} {noun}{'s' if n != 1 else ''}"
                            + (" (directly)" if self.is_level else ""))
 
     # ----- edits ---------------------------------------------------------- #
@@ -189,10 +229,19 @@ class _ChoiceTab(QWidget):
         ch = self._current()
         if ch is None:
             return
-        if self.is_level:
-            self.doc.update_level(ch.id, **fields)
-        else:
-            self.doc.update_status(ch.id, **fields)
+        if not self._ops["update"](ch.id, **fields):
+            self._show_current()  # rejected (e.g. last done state): show the real value
+
+    def _symbol_edited(self) -> None:
+        self._set_symbol(self.symbol_edit.text())
+
+    def _set_symbol(self, symbol: str) -> None:
+        ch = self._current()
+        symbol = symbol.strip()
+        if ch and symbol and symbol != ch.symbol:
+            self._update(symbol=symbol)
+        elif ch:
+            self.symbol_edit.setText(ch.symbol)
 
     def _name_edited(self) -> None:
         ch = self._current()
@@ -239,13 +288,10 @@ class _ChoiceTab(QWidget):
     def _default_toggled(self, on: bool) -> None:
         ch = self._current()
         if ch and on:
-            if self.is_level:
-                self.doc.set_default_level(ch.id)
-            else:
-                self.doc.set_default_status(ch.id)
+            self._ops["set_default"](ch.id)
 
     def _add(self) -> None:
-        label = "level" if self.is_level else "status"
+        label = {"level": "level", "status": "status", "task_state": "task state"}[self.kind]
         name, ok = QInputDialog.getText(self, f"Add {label}", f"Name of the new {label}:")
         if not ok or not name.strip():
             return
@@ -253,6 +299,9 @@ class _ChoiceTab(QWidget):
         index = row + 1 if row >= 0 else None
         if self.is_level:
             self.doc.add_level(name.strip(), "#607d8b", index=index)
+        elif self.is_task_state:
+            self.doc.add_task_state(name.strip(), "#607d8b", "◔", StatusRole.ACTIVE,
+                                    index=index)
         else:
             self.doc.add_status(name.strip(), "#607d8b", StatusRole.ACTIVE, index=index)
         self.list.setCurrentRow(index if index is not None else self.list.count() - 1)
@@ -267,11 +316,12 @@ class _ChoiceTab(QWidget):
             return
         n = self._usage_count(ch.id)
         target = others[0]
-        if n:  # FR-3.4 / FR-3a.3: reassign bones that use it
+        if n:  # FR-3.4 / FR-3a.3: reassign bones (or tasks) that use it
+            noun = "task" if self.is_task_state else "cause"
             names = [c.name for c in others]
             choice, ok = QInputDialog.getItem(
-                self, "Reassign causes",
-                f"{n} cause{'s use' if n != 1 else ' uses'} “{ch.name}”. Move them to:",
+                self, f"Reassign {noun}s",
+                f"{n} {noun}{'s use' if n != 1 else ' uses'} “{ch.name}”. Move them to:",
                 names, 0, False)
             if not ok:
                 return
@@ -279,20 +329,14 @@ class _ChoiceTab(QWidget):
         elif QMessageBox.question(self, "Delete", f"Delete “{ch.name}”?") != \
                 QMessageBox.StandardButton.Yes:
             return
-        if self.is_level:
-            self.doc.delete_level(ch.id, target.id)
-        else:
-            self.doc.delete_status(ch.id, target.id)
+        self._ops["delete"](ch.id, target.id)
 
     def _move(self, delta: int) -> None:
         ch = self._current()
         if ch is None:
             return
         row = self.list.currentRow() + delta
-        if self.is_level:
-            self.doc.move_level(ch.id, row)
-        else:
-            self.doc.move_status(ch.id, row)
+        self._ops["move"](ch.id, row)
         self.list.setCurrentRow(row)
 
 
@@ -310,6 +354,8 @@ class ChoicesDialog(QDialog):
         self.status_tab = _ChoiceTab(doc, "status")
         self.tabs.addTab(self.levels_tab, "Levels")
         self.tabs.addTab(self.status_tab, "Statuses")
+        self.task_states_tab = _ChoiceTab(doc, "task_state")
+        self.tabs.addTab(self.task_states_tab, "Task states")
         layout.addWidget(self.tabs, 1)
 
         bottom = QHBoxLayout()

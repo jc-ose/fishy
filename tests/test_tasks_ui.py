@@ -102,3 +102,38 @@ def test_timeline_summary_shows_task_title(qtbot, doc_with_cause):
     dlg = TimelineDialog(doc)
     qtbot.addWidget(dlg)
     assert dlg.tree.topLevelItem(0).text(2) == "Pull records"
+
+
+def test_task_states_tab_add_and_edit(qtbot, doc, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    from fishy.views.choices_dialog import ChoicesDialog
+
+    dlg = ChoicesDialog(doc)
+    qtbot.addWidget(dlg)
+    tab = dlg.task_states_tab
+    assert dlg.tabs.tabText(2) == "Task states" and tab.list.count() == 4
+    tab.list.setCurrentRow(1)
+    tab.symbol_edit.setText("▶")
+    tab.symbol_edit.editingFinished.emit()
+    assert doc.ordered_task_states()[1].symbol == "▶"
+    assert tab.usage.text() == "Used by 0 tasks"
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Waiting", True)))
+    tab._add()
+    assert len(doc.task_states) == 5
+    assert doc.ordered_task_states()[2].name == "Waiting"
+
+
+def test_task_states_tab_reports_done_rule(qtbot, doc):
+    from fishy.views.choices_dialog import ChoicesDialog
+
+    dlg = ChoicesDialog(doc)
+    qtbot.addWidget(dlg)
+    tab = dlg.task_states_tab
+    tab.list.setCurrentRow(3)  # Done
+    errors = []
+    doc.error.connect(errors.append)
+    tab.role.setCurrentIndex(tab.role.findData("active"))
+    tab.role.activated.emit(tab.role.currentIndex())
+    assert errors and "must count as done" in errors[0]
+    assert tab.role.currentData() == "done"  # reverted on screen
