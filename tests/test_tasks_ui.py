@@ -196,3 +196,89 @@ def test_task_editor_closes_when_task_deleted(qtbot, doc):
     assert open_task_editor(doc, t, None) is ed  # one editor per task
     doc.delete_task(t)
     assert (id(doc), t) not in _open_editors
+
+
+def _section(qtbot, doc, settings, bone_id):
+    from fishy.views.tasks import BoneTasksSection
+
+    sec = BoneTasksSection(settings)
+    qtbot.addWidget(sec)
+    sec.set_document(doc)
+    sec.show_bone(bone_id)
+    return sec
+
+
+def test_section_hides_done_and_toggle_shows(qtbot, doc_with_cause, tmp_settings):
+    doc, cause = doc_with_cause
+    a = doc.add_task("a", [cause])
+    b = doc.add_task("b", [cause])
+    doc.toggle_task(b)
+    sec = _section(qtbot, doc, tmp_settings, cause)
+    assert sec.visible_task_ids() == [a] and sec.show_done.text() == "Show done (1)"
+    sec.show_done.setChecked(True)
+    assert sec.visible_task_ids() == [a, b]
+    assert tmp_settings.value("tasks/show_done", type=bool)
+
+
+def test_done_row_fades_then_hides(qtbot, doc_with_cause, tmp_settings):
+    doc, cause = doc_with_cause
+    a = doc.add_task("a", [cause])
+    sec = _section(qtbot, doc, tmp_settings, cause)
+    doc.toggle_task(a)
+    assert sec.visible_task_ids() == [a]
+    qtbot.waitUntil(lambda: sec.visible_task_ids() == [], timeout=3000)
+    assert sec.show_done.text() == "Show done (1)"
+
+
+def test_category_groups(qtbot, doc, tmp_settings):
+    cat = doc.tree.roots()[0]
+    c1 = doc.add_bone(cat, "c1")
+    d = doc.add_task("direct", [cat])
+    s = doc.add_task("sub", [c1, cat])
+    only_sub = doc.add_task("only sub", [c1])
+    sec = _section(qtbot, doc, tmp_settings, cat)
+    assert sec.visible_task_ids() == [d, s, only_sub]  # s listed once, as a direct link
+    assert sec.header.text() == "Tasks (3 open)"
+    headers = [sec.list.topLevelItem(i).text(1) for i in range(sec.list.topLevelItemCount())
+               if sec.list.topLevelItem(i).data(0, 256) is None]
+    assert headers == ["1.1 c1"]
+
+
+def test_section_click_symbol_toggles_and_add(qtbot, doc_with_cause, tmp_settings, monkeypatch):
+    from fishy.views import tasks as tasks_view
+
+    doc, cause = doc_with_cause
+    a = doc.add_task("a", [cause])
+    sec = _section(qtbot, doc, tmp_settings, cause)
+    sec.list.itemClicked.emit(sec.item_for(a), 0)
+    assert doc.is_task_done(a)
+    opened = []
+    monkeypatch.setattr(tasks_view, "open_task_editor", lambda d, t, p: opened.append(t))
+    sec.add_btn.click()
+    (new,) = set(doc.tasks) - {a}
+    assert doc.tasks[new].bone_ids == [cause] and opened == [new]
+
+
+def test_section_unlink_and_cycle(qtbot, doc_with_cause, tmp_settings):
+    doc, cause = doc_with_cause
+    a = doc.add_task("a", [cause])
+    sec = _section(qtbot, doc, tmp_settings, cause)
+    sec.list.setCurrentItem(sec.item_for(a))
+    sec.cycle_current()
+    assert doc.tasks[a].state_id == doc.ordered_task_states()[1].id
+    sec.unlink_current()
+    assert doc.tasks[a].bone_ids == [] and sec.visible_task_ids() == []
+
+
+def test_details_panel_has_tasks_section(qtbot, doc_with_cause, tmp_settings):
+    from fishy.views.details_panel import DetailsPanel
+
+    doc, cause = doc_with_cause
+    t = doc.add_task("a", [cause])
+    panel = DetailsPanel(settings=tmp_settings)
+    qtbot.addWidget(panel)
+    panel.set_document(doc)
+    panel.show_bone(cause)
+    assert panel.tasks.visible_task_ids() == [t]
+    panel.show_bone(doc.tree.roots()[0])
+    assert panel.tasks.visible_task_ids() == [t]  # category rolls up

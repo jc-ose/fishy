@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtCore import QDate, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,8 +24,12 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -378,3 +382,262 @@ def open_task_editor(doc: ProjectDocument, task_id: int, parent: QWidget | None)
     ed.raise_()
     ed.activateWindow()
     return ed
+
+
+SHOW_DONE_KEY = "tasks/show_done"
+OVERDUE_COLOR = "#d32f2f"
+MUTED_COLOR = "#9e9e9e"
+
+
+def confirm_delete_task(doc: ProjectDocument, task_id: int, parent: QWidget | None) -> bool:
+    """Delete a task, asking first when log entries reference it (spec §4.7)."""
+    refs = doc.entries_referencing_task(task_id)
+    if refs:
+        n = len(refs)
+        answer = QMessageBox.question(
+            parent, "Delete task",
+            f"“{doc.tasks[task_id].title}” is referenced in {n} log entr"
+            f"{'y' if n == 1 else 'ies'}. Delete it anyway?\n\nYou can undo this.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+    return doc.delete_task(task_id)
+
+
+class BoneTasksSection(QWidget):
+    """The Tasks section of the details panel (spec §4.5)."""
+
+    openTask = Signal(int)
+    FADE_MS = 1500
+    COL_SYMBOL, COL_TITLE, COL_ASSIGNEE, COL_DUE, COL_FLAG = range(5)
+
+    def __init__(self, settings: QSettings | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.doc: ProjectDocument | None = None
+        self.bone_id: int | None = None
+        self._fading: set[int] = set()
+        self._shown_open: set[int] = set()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 6, 0, 0)
+        head = QHBoxLayout()
+        self.header = QLabel("Tasks")
+        self.header.setStyleSheet("font-weight: 600;")
+        head.addWidget(self.header)
+        head.addStretch(1)
+        self.show_done = QToolButton()
+        self.show_done.setCheckable(True)
+        self.show_done.setAutoRaise(True)
+        self.show_done.setChecked(bool(settings.value(SHOW_DONE_KEY, False, type=bool))
+                                  if settings is not None else False)
+        self.show_done.toggled.connect(self._show_done_toggled)
+        head.addWidget(self.show_done)
+        self.add_btn = QPushButton("+ Add")
+        self.add_btn.clicked.connect(self.add_task)
+        self.link_btn = QPushButton("Link existing…")
+        self.link_btn.clicked.connect(self.link_existing)
+        head.addWidget(self.add_btn)
+        head.addWidget(self.link_btn)
+        layout.addLayout(head)
+
+        self.list = QTreeWidget()
+        self.list.setColumnCount(5)
+        self.list.setHeaderHidden(True)
+        self.list.setRootIsDecorated(False)
+        self.list.setIndentation(0)
+        self.list.setUniformRowHeights(True)
+        self.list.setMaximumHeight(180)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
+        self.list.itemClicked.connect(self._clicked)
+        self.list.itemDoubleClicked.connect(self._double_clicked)
+        header = self.list.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(self.COL_TITLE, header.ResizeMode.Stretch)
+        for col in (self.COL_SYMBOL, self.COL_ASSIGNEE, self.COL_DUE, self.COL_FLAG):
+            header.setSectionResizeMode(col, header.ResizeMode.ResizeToContents)
+        layout.addWidget(self.list)
+        QShortcut(QKeySequence("Ctrl+Shift+Return"), self.list, activated=self.cycle_current,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        self._fade_timer = QTimer(self, singleShot=True, interval=self.FADE_MS)
+        self._fade_timer.timeout.connect(self._fade_done)
+
+    # ----- wiring --------------------------------------------------------- #
+
+    def set_document(self, doc: ProjectDocument | None) -> None:
+        self.doc = doc
+        self.bone_id = None
+        if doc is not None:
+            doc.tasksChanged.connect(self.refresh)
+            doc.changed.connect(self.refresh)  # numbers and titles in group headers
+        self.refresh()
+
+    def show_bone(self, bone_id: int | None) -> None:
+        if bone_id != self.bone_id:
+            self._fading.clear()
+            self._shown_open = set()
+        self.bone_id = bone_id
+        self.refresh()
+
+    # ----- display -------------------------------------------------------- #
+
+    def refresh(self, *_args) -> None:
+        keep = self._current()
+        self.list.clear()
+        self._populate()
+        if keep is not None and (item := self.item_for(keep)) is not None:
+            self.list.setCurrentItem(item)
+
+    def _populate(self) -> None:
+        doc, bid = self.doc, self.bone_id
+        if doc is None or bid is None or bid not in doc.tree.bones:
+            return
+        show_done = self.show_done.isChecked()
+        groups = doc.task_groups(bid)
+        all_ids = [t for _, ids in groups for t in ids]
+        done_ids = {t for t in all_ids if doc.is_task_done(t)}
+        # A task just marked done stays (muted) for a moment so it can still be undone.
+        if not show_done:
+            newly = (self._shown_open & done_ids) - self._fading
+            if newly:
+                self._fading |= newly
+                self._fade_timer.start()
+        self._fading &= done_ids
+        visible_done = done_ids if show_done else self._fading
+        self._shown_open = set(all_ids) - done_ids
+        n_open = len(self._shown_open)
+        self.header.setText(f"Tasks ({n_open} open)" if all_ids else "Tasks")
+        hidden = len(done_ids - visible_done)
+        self.show_done.setText(f"Show done ({hidden})" if not show_done
+                               else f"Hide done ({len(done_ids)})")
+        self.show_done.setVisible(bool(done_ids))
+        bold = QFont(self.list.font())
+        bold.setBold(True)
+        for group_bone, ids in groups:
+            rows = [t for t in ids if t not in done_ids or t in visible_done]
+            if not rows:
+                continue
+            if group_bone != bid:
+                head = QTreeWidgetItem(["", _bone_label(doc, group_bone)])
+                head.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                head.setFont(self.COL_TITLE, bold)
+                self.list.addTopLevelItem(head)
+                head.setFirstColumnSpanned(False)
+            for t in rows:
+                self.list.addTopLevelItem(self._row(t, faded=t in self._fading))
+        self.list.setVisible(self.list.topLevelItemCount() > 0)
+
+    def _row(self, task_id: int, faded: bool) -> QTreeWidgetItem:
+        doc = self.doc
+        task = doc.tasks[task_id]
+        st = doc.task_states.get(task.state_id)
+        done = doc.is_task_done(task_id)
+        item = QTreeWidgetItem([st.symbol if st else "☐", task.title, task.assignee or "—",
+                                task.due_date or "", "⚑" if task.critical else ""])
+        item.setData(self.COL_SYMBOL, Qt.ItemDataRole.UserRole, task_id)
+        item.setForeground(self.COL_SYMBOL, QBrush(QColor(st.color if st else MUTED_COLOR)))
+        item.setToolTip(self.COL_SYMBOL, f"{st.name if st else ''} — click to toggle, "
+                        "right-click for all states")
+        item.setToolTip(self.COL_TITLE, task.notes or task.title)
+        if done or faded:
+            font = item.font(self.COL_TITLE)
+            font.setStrikeOut(True)
+            item.setFont(self.COL_TITLE, font)
+            for col in range(1, 5):
+                item.setForeground(col, QBrush(QColor(MUTED_COLOR)))
+        elif doc.is_task_overdue(task_id):
+            item.setForeground(self.COL_DUE, QBrush(QColor(OVERDUE_COLOR)))
+            item.setToolTip(self.COL_DUE, "Overdue")
+        if task.critical:
+            item.setForeground(self.COL_FLAG, QBrush(QColor(OVERDUE_COLOR)))
+            item.setToolTip(self.COL_FLAG, "Critical")
+        return item
+
+    def visible_task_ids(self) -> list[int]:
+        out = []
+        for i in range(self.list.topLevelItemCount()):
+            t = self.list.topLevelItem(i).data(self.COL_SYMBOL, Qt.ItemDataRole.UserRole)
+            if t is not None:
+                out.append(t)
+        return out
+
+    def item_for(self, task_id: int) -> QTreeWidgetItem | None:
+        for i in range(self.list.topLevelItemCount()):
+            item = self.list.topLevelItem(i)
+            if item.data(self.COL_SYMBOL, Qt.ItemDataRole.UserRole) == task_id:
+                return item
+        return None
+
+    def _fade_done(self) -> None:
+        self._fading.clear()
+        self.refresh()
+
+    def _show_done_toggled(self, on: bool) -> None:
+        if self.settings is not None:
+            self.settings.setValue(SHOW_DONE_KEY, on)
+        self._fading.clear()
+        self.refresh()
+
+    # ----- actions -------------------------------------------------------- #
+
+    def _task_at(self, item: QTreeWidgetItem | None) -> int | None:
+        return None if item is None else item.data(self.COL_SYMBOL, Qt.ItemDataRole.UserRole)
+
+    def _current(self) -> int | None:
+        return self._task_at(self.list.currentItem())
+
+    def _clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        task_id = self._task_at(item)
+        if task_id is not None and column == self.COL_SYMBOL:
+            self.doc.toggle_task(task_id)
+
+    def _double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        task_id = self._task_at(item)
+        if task_id is not None and column != self.COL_SYMBOL:
+            self._open(task_id)
+
+    def _open(self, task_id: int) -> None:
+        self.openTask.emit(task_id)
+        open_task_editor(self.doc, task_id, self)
+
+    def cycle_current(self) -> None:
+        task_id = self._current()
+        if task_id is not None:
+            self.doc.cycle_task(task_id)
+
+    def unlink_current(self) -> None:
+        task_id = self._current()
+        if task_id is not None and self.bone_id in self.doc.tasks[task_id].bone_ids:
+            self.doc.unlink_task(task_id, self.bone_id)
+
+    def add_task(self) -> None:
+        if self.doc is None or self.bone_id is None:
+            return
+        task_id = self.doc.add_task("New task", [self.bone_id])
+        if task_id is not None:
+            self._open(task_id)
+
+    def link_existing(self) -> None:
+        if self.doc is None or self.bone_id is None:
+            return
+        direct = self.doc.task_links.get(self.bone_id, set())
+        task_id = pick_task(self.doc, self, exclude=set(direct))
+        if task_id is not None:
+            self.doc.link_task(task_id, self.bone_id)
+
+    def _context_menu(self, pos) -> None:
+        item = self.list.itemAt(pos)
+        task_id = self._task_at(item)
+        if task_id is None:
+            return
+        self.list.setCurrentItem(item)
+        menu = QMenu(self)
+        menu.addAction("Edit…", lambda: self._open(task_id))
+        states = state_menu(self.doc, task_id, menu)
+        states.setTitle("State")
+        menu.addMenu(states)
+        if self.bone_id in self.doc.tasks[task_id].bone_ids:
+            menu.addAction("Unlink from this bone", self.unlink_current)
+        menu.addSeparator()
+        menu.addAction("Delete task…", lambda: confirm_delete_task(self.doc, task_id, self))
+        menu.exec(self.list.viewport().mapToGlobal(pos))

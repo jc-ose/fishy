@@ -32,6 +32,7 @@ from fishy.document import ProjectDocument
 from fishy.models.bone_tree_model import local_time
 from fishy.views.bone_tree_view import swatch
 from fishy.views.evidence import EvidenceLog
+from fishy.views.tasks import BoneTasksSection
 
 DESCRIPTION_IDLE_MS = 1200
 
@@ -122,6 +123,9 @@ class DetailsPanel(QWidget):
         self.description.textChanged.connect(self._desc_timer.start)
         form_host.addWidget(self.description)
 
+        self.tasks = BoneTasksSection(settings)
+        form_host.addWidget(self.tasks)
+
         self.evidence = EvidenceLog(settings)
         form_host.addWidget(self.evidence)
         self.category_note = QLabel("Categories don't hold evidence; add it to one of their "
@@ -154,6 +158,7 @@ class DetailsPanel(QWidget):
         self.doc = doc
         self.bone_id = None
         self.evidence.set_document(doc)
+        self.tasks.set_document(doc)
         if doc is not None:
             doc.changed.connect(self.refresh)
             doc.choicesChanged.connect(self.refresh)
@@ -194,6 +199,7 @@ class DetailsPanel(QWidget):
             self.stack.setCurrentWidget(self.empty)
             if self.evidence.bone_id is not None:
                 self.evidence.show_bone(None)
+            self.tasks.show_bone(None)
             return
         self.stack.setCurrentIndex(1)
         bid = self.bone_id
@@ -236,6 +242,8 @@ class DetailsPanel(QWidget):
             self._fill(self.status, doc.ordered_statuses(), bone.status_id)
             self.status_stack.setCurrentWidget(self.status)
 
+        if self.tasks.bone_id != bid:
+            self.tasks.show_bone(bid)
         self.evidence.setVisible(not is_cat)
         self.category_note.setVisible(is_cat)
         wanted = None if is_cat else bid
