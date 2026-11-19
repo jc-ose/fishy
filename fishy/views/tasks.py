@@ -12,11 +12,13 @@ from collections.abc import Iterable
 from PySide6.QtCore import QDate, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -27,6 +29,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QStyledItemDelegate,
+    QTableView,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -641,3 +645,230 @@ class BoneTasksSection(QWidget):
         menu.addSeparator()
         menu.addAction("Delete task…", lambda: confirm_delete_task(self.doc, task_id, self))
         menu.exec(self.list.viewport().mapToGlobal(pos))
+
+
+# =========================================================================== #
+# Tasks window (all tasks)
+# =========================================================================== #
+
+
+NO_DATE = QDate(2000, 1, 1)  # the date editor's minimum, shown as "No date"
+
+
+class _AssigneeDelegate(QStyledItemDelegate):
+    def __init__(self, doc: ProjectDocument, parent=None) -> None:
+        super().__init__(parent)
+        self.doc = doc
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.addItems(self.doc.assignees())
+        return combo
+
+    def setEditorData(self, editor, index) -> None:
+        editor.setEditText(index.data(Qt.ItemDataRole.EditRole) or "")
+
+    def setModelData(self, editor, model, index) -> None:
+        model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+
+class _DueDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        edit = QDateEdit(parent)
+        edit.setCalendarPopup(True)
+        edit.setDisplayFormat("yyyy-MM-dd")
+        edit.setMinimumDate(NO_DATE)
+        edit.setSpecialValueText("No date")
+        return edit
+
+    def setEditorData(self, editor, index) -> None:
+        value = index.data(Qt.ItemDataRole.EditRole)
+        editor.setDate(value if isinstance(value, QDate) and value.isValid()
+                       else QDate.currentDate())
+
+    def setModelData(self, editor, model, index) -> None:
+        date = editor.date()
+        model.setData(index, None if date == NO_DATE else date, Qt.ItemDataRole.EditRole)
+
+
+class TasksWindow(QDialog):
+    """Every task in the project: sortable, filterable, editable (spec §4.10)."""
+
+    boneSelected = Signal(int)
+    openEntry = Signal(int, int)
+
+    def __init__(self, doc: ProjectDocument, parent=None) -> None:
+        from fishy.models.task_table_model import TaskCol, TaskFilterProxy, TaskTableModel
+
+        super().__init__(parent)
+        self.doc = doc
+        self.setWindowTitle("Tasks")
+        self.resize(1000, 560)
+        layout = QVBoxLayout(self)
+
+        bar = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search title, notes, assignee")
+        self.search.setClearButtonEnabled(True)
+        bar.addWidget(self.search, 2)
+        self.hide_done = QCheckBox("Hide done")
+        self.hide_done.setChecked(True)
+        bar.addWidget(self.hide_done)
+        self.assignee_filter = QComboBox()
+        self.assignee_filter.setMinimumWidth(140)
+        bar.addWidget(self.assignee_filter)
+        self.critical_only = QCheckBox("Critical only")
+        self.overdue_only = QCheckBox("Overdue only")
+        self.unlinked_only = QCheckBox("Unlinked only")
+        for box in (self.critical_only, self.overdue_only, self.unlinked_only):
+            bar.addWidget(box)
+        layout.addLayout(bar)
+
+        self.model = TaskTableModel(doc, self)
+        self.proxy = TaskFilterProxy(doc, self)
+        self.proxy.setSourceModel(self.model)
+        self.table = QTableView()
+        self.table.setModel(self.proxy)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(TaskCol.ID, Qt.SortOrder.AscendingOrder)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
+                                   | QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setItemDelegateForColumn(TaskCol.ASSIGNEE, _AssigneeDelegate(doc, self))
+        self.table.setItemDelegateForColumn(TaskCol.DUE, _DueDelegate(self))
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(TaskCol.TITLE, header.ResizeMode.Stretch)
+        for col, width in ((TaskCol.ID, 50), (TaskCol.STATE, 130), (TaskCol.BONES, 110),
+                           (TaskCol.ASSIGNEE, 130), (TaskCol.DUE, 95),
+                           (TaskCol.CRITICAL, 34), (TaskCol.UPDATED, 125)):
+            header.resizeSection(col, width)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
+        self.table.clicked.connect(self._clicked)
+        self.table.doubleClicked.connect(self._double_clicked)
+        self.table.selectionModel().currentRowChanged.connect(self._row_changed)
+        QShortcut(QKeySequence("Ctrl+Shift+Return"), self.table, activated=self.cycle_current,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        layout.addWidget(self.table, 1)
+
+        bottom = QHBoxLayout()
+        self.summary = QLabel()
+        bottom.addWidget(self.summary)
+        bottom.addStretch(1)
+        hint = QLabel("Click a checkbox to toggle · right-click for all states · "
+                      "double-click to edit")
+        theme.mark(hint, muted=True)
+        bottom.addWidget(hint)
+        self.new_btn = QPushButton("+ New task")
+        self.new_btn.clicked.connect(self.new_task)
+        self.export_btn = QPushButton("Export CSV…")
+        self.export_btn.clicked.connect(self.export_csv)
+        bottom.addWidget(self.new_btn)
+        bottom.addWidget(self.export_btn)
+        layout.addLayout(bottom)
+
+        self.search.textChanged.connect(self.proxy.set_text)
+        self.hide_done.toggled.connect(self.proxy.set_hide_done)
+        self.critical_only.toggled.connect(self.proxy.set_critical_only)
+        self.overdue_only.toggled.connect(self.proxy.set_overdue_only)
+        self.unlinked_only.toggled.connect(self.proxy.set_unlinked_only)
+        self.assignee_filter.activated.connect(
+            lambda _i: self.proxy.set_assignee(self.assignee_filter.currentData()))
+        doc.tasksChanged.connect(self.refresh)
+        self.refresh()
+
+    # ----- display -------------------------------------------------------- #
+
+    def refresh(self, *_args) -> None:
+        doc = self.doc
+        ids = list(doc.tasks)
+        open_ids = [t for t in ids if not doc.is_task_done(t)]
+        overdue = sum(1 for t in open_ids if doc.is_task_overdue(t))
+        critical = sum(1 for t in open_ids if doc.tasks[t].critical)
+        self.summary.setText(f"{len(ids)} task{'s' if len(ids) != 1 else ''} · "
+                             f"{len(open_ids)} open · {overdue} overdue · {critical} critical")
+        current = self.assignee_filter.currentData()
+        self.assignee_filter.blockSignals(True)
+        self.assignee_filter.clear()
+        self.assignee_filter.addItem("All assignees", None)
+        self.assignee_filter.addItem("Unassigned", "")
+        for name in doc.assignees():
+            self.assignee_filter.addItem(name, name)
+        i = self.assignee_filter.findData(current)
+        self.assignee_filter.setCurrentIndex(max(0, i))
+        self.assignee_filter.blockSignals(False)
+
+    # ----- actions -------------------------------------------------------- #
+
+    def _task_at(self, index) -> int | None:
+        from fishy.models.task_table_model import TaskIdRole
+
+        return index.data(TaskIdRole) if index.isValid() else None
+
+    def current_task(self) -> int | None:
+        return self._task_at(self.table.currentIndex())
+
+    def _clicked(self, index) -> None:
+        from fishy.models.task_table_model import TaskCol
+
+        task_id = self._task_at(index)
+        if task_id is not None and index.column() == TaskCol.STATE:
+            self.doc.toggle_task(task_id)
+
+    def _double_clicked(self, index) -> None:
+        from fishy.models.task_table_model import TaskCol
+
+        task_id = self._task_at(index)
+        if task_id is None or index.column() == TaskCol.STATE:
+            return
+        if not (index.flags() & Qt.ItemFlag.ItemIsEditable):
+            self.open_task(task_id)
+
+    def _row_changed(self, current, _previous) -> None:
+        task_id = self._task_at(current)
+        if task_id is not None and len(self.doc.tasks[task_id].bone_ids) == 1:
+            self.boneSelected.emit(self.doc.tasks[task_id].bone_ids[0])
+
+    def open_task(self, task_id: int) -> None:
+        ed = open_task_editor(self.doc, task_id, self)
+        win = self.parent().window() if self.parent() is not None else None
+        if win is None or not hasattr(win, "select_bone"):
+            ed.boneClicked.connect(self.boneSelected)
+            ed.openEntry.connect(self.openEntry)
+
+    def cycle_current(self) -> None:
+        task_id = self.current_task()
+        if task_id is not None:
+            self.doc.cycle_task(task_id)
+
+    def new_task(self) -> None:
+        task_id = self.doc.add_task("New task")
+        if task_id is not None:
+            self.open_task(task_id)
+
+    def export_csv(self) -> None:
+        from fishy.export.data import write_tasks_csv
+
+        path, _ = QFileDialog.getSaveFileName(self, "Export tasks", "tasks.csv",
+                                              "CSV (*.csv)")
+        if path:
+            write_tasks_csv(self.doc, path, self.proxy.visible_task_ids())
+
+    def _context_menu(self, pos) -> None:
+        index = self.table.indexAt(pos)
+        task_id = self._task_at(index)
+        if task_id is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Edit…", lambda: self.open_task(task_id))
+        states = state_menu(self.doc, task_id, menu)
+        states.setTitle("State")
+        menu.addMenu(states)
+        menu.addSeparator()
+        menu.addAction("Delete task…", lambda: confirm_delete_task(self.doc, task_id, self))
+        menu.exec(self.table.viewport().mapToGlobal(pos))

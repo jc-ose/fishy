@@ -9,6 +9,7 @@ computed numbers and rolled-up levels so other tools needn't recompute them.
 from __future__ import annotations
 
 import base64
+import csv
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,9 @@ from fishy import __version__ as APP_VERSION
 
 if TYPE_CHECKING:
     from fishy.document import ProjectDocument
+
+CSV_COLUMNS = ["ID", "State", "Done", "Title", "Bones", "Assignee", "Due", "Critical",
+               "Overdue", "Notes", "Created", "Created by", "Updated", "Updated by"]
 
 JSON_FORMAT = "fishy-project"
 JSON_VERSION = 1
@@ -149,3 +153,43 @@ def write_json(doc: ProjectDocument, path: str | Path, include_images: bool = Tr
 
 def write_outline(doc: ProjectDocument, path: str | Path, details: bool = True) -> None:
     Path(path).write_text(outline_text(doc, details), encoding="utf-8")
+
+
+# =========================================================================== #
+# Tasks (CSV)
+# =========================================================================== #
+
+
+def task_rows(doc: ProjectDocument, task_ids: list[int] | None = None) -> list[list[str]]:
+    """One row per task, columns as `CSV_COLUMNS`; all tasks by id when `task_ids` is None."""
+    from fishy.models.bone_tree_model import local_time
+
+    users = doc.repo.users()
+
+    def who(uid: int | None) -> str:
+        return users[uid].display_name if uid in users else ""
+
+    def yes(flag: bool) -> str:
+        return "yes" if flag else "no"
+
+    ids = sorted(doc.tasks) if task_ids is None else [t for t in task_ids if t in doc.tasks]
+    rows = []
+    for tid in ids:
+        task = doc.tasks[tid]
+        st = doc.task_states.get(task.state_id)
+        bones = "; ".join(f"{doc.numbers.get(b, '')} {doc.bone(b).title}".strip()
+                          for b in task.bone_ids if b in doc.tree.bones)
+        rows.append([str(tid), st.name if st else "", yes(doc.is_task_done(tid)), task.title,
+                     bones, task.assignee or "", task.due_date or "", yes(task.critical),
+                     yes(doc.is_task_overdue(tid)), task.notes, local_time(task.created_at),
+                     who(task.created_by), local_time(task.updated_at), who(task.updated_by)])
+    return rows
+
+
+def write_tasks_csv(doc: ProjectDocument, path: str | Path,
+                    task_ids: list[int] | None = None) -> None:
+    """Tasks as CSV: UTF-8 with BOM and CRLF, so Excel reads glyphs and accents."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, lineterminator="\r\n")
+        writer.writerow(CSV_COLUMNS)
+        writer.writerows(task_rows(doc, task_ids))

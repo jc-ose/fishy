@@ -282,3 +282,89 @@ def test_details_panel_has_tasks_section(qtbot, doc_with_cause, tmp_settings):
     assert panel.tasks.visible_task_ids() == [t]
     panel.show_bone(doc.tree.roots()[0])
     assert panel.tasks.visible_task_ids() == [t]  # category rolls up
+
+
+def test_window_filters_sort_and_edit(qtbot, doc_with_cause):
+    from datetime import date
+
+    from PySide6.QtCore import Qt
+
+    from fishy.models.task_table_model import TaskCol
+    from fishy.views.tasks import TasksWindow
+
+    doc, cause = doc_with_cause
+    doc.today = lambda: date(2026, 11, 19)
+    a = doc.add_task("a", [cause], due_date="2026-12-01", assignee="A. Lee")
+    b = doc.add_task("b", due_date="2026-11-01", critical=True)
+    c = doc.add_task("c")
+    doc.toggle_task(c)
+    w = TasksWindow(doc)
+    qtbot.addWidget(w)
+    assert set(w.proxy.visible_task_ids()) == {a, b}  # hide done by default
+    w.table.sortByColumn(TaskCol.DUE, Qt.SortOrder.AscendingOrder)
+    assert w.proxy.visible_task_ids() == [b, a]
+    w.proxy.set_unlinked_only(True)
+    assert w.proxy.visible_task_ids() == [b]
+    w.proxy.set_unlinked_only(False)
+    w.proxy.set_critical_only(True)
+    assert w.proxy.visible_task_ids() == [b]
+    w.proxy.set_critical_only(False)
+    w.proxy.set_assignee("")
+    assert w.proxy.visible_task_ids() == [b]
+    w.proxy.set_assignee("a. lee")
+    assert w.proxy.visible_task_ids() == [a]
+    w.proxy.set_assignee(None)
+    w.proxy.set_overdue_only(True)
+    assert w.proxy.visible_task_ids() == [b]
+    w.proxy.set_overdue_only(False)
+    w.proxy.set_text("A. LEE")
+    assert w.proxy.visible_task_ids() == [a]
+    w.proxy.set_text("")
+    w.proxy.set_hide_done(False)
+    assert set(w.proxy.visible_task_ids()) == {a, b, c}
+    idx = w.model.index(w.model.row_for(a), TaskCol.TITLE)
+    assert w.model.setData(idx, "renamed") and doc.tasks[a].title == "renamed"
+    assert not w.model.setData(idx, " ")
+    assert w.summary.text() == "3 tasks · 2 open · 1 overdue · 1 critical"
+
+
+def test_window_edits_state_due_critical_and_bones_column(qtbot, doc_with_cause):
+    from PySide6.QtCore import QDate, Qt
+
+    from fishy.models.task_table_model import TaskCol
+    from fishy.views.tasks import TasksWindow
+
+    doc, cause = doc_with_cause
+    t = doc.add_task("a", [cause])
+    w = TasksWindow(doc)
+    qtbot.addWidget(w)
+    m, row = w.model, w.model.row_for(t)
+    assert m.data(m.index(row, TaskCol.BONES)) == "1.1"
+    assert m.data(m.index(row, TaskCol.ID)) == f"#{t}"
+    states = doc.ordered_task_states()
+    assert m.setData(m.index(row, TaskCol.STATE), states[1].id)
+    assert doc.tasks[t].state_id == states[1].id
+    assert m.setData(m.index(row, TaskCol.DUE), QDate(2026, 11, 24))
+    assert doc.tasks[t].due_date == "2026-11-24"
+    assert m.setData(m.index(row, TaskCol.DUE), None) and doc.tasks[t].due_date is None
+    assert m.setData(m.index(row, TaskCol.CRITICAL), Qt.CheckState.Checked.value,
+                     Qt.ItemDataRole.CheckStateRole)
+    assert doc.tasks[t].critical
+
+
+def test_window_export_uses_visible_rows(qtbot, doc, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    from fishy.views.tasks import TasksWindow
+
+    a = doc.add_task("a")
+    b = doc.add_task("b")
+    doc.toggle_task(b)
+    w = TasksWindow(doc)
+    qtbot.addWidget(w)
+    path = tmp_path / "out.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a_, **k: (str(path), "CSV (*.csv)")))
+    w.export_btn.click()
+    text = path.read_bytes().decode("utf-8-sig")
+    assert f"\r\n{a}," in text and f"\r\n{b}," not in text
