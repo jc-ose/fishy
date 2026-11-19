@@ -1,0 +1,34 @@
+[project]
+name = "fishy"
+version = "0.6.0"
+description = "Root-cause analysis with an auto-generated, always-in-sync fishbone diagram"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "markdown-it-py>=3",
+    "mdit-py-plugins>=0.4",
+    "pygments>=2.18",
+    "pyside6>=6.12",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-qt>=4.4",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+qt_api = "pyside6"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Qt idiom: default parent=QModelIndex() (an immutable invalid index)
+extend-immutable-calls = ["PySide6.QtCore.QModelIndex"]
