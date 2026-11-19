@@ -119,3 +119,26 @@ def test_status_delete_still_restores(repo):  # regression for the generalised h
     cause = repo.add_bone(repo.bones()[0].id, "c", status_id=st.id).id
     repo.restore_choice(repo.delete_status(st.id, repo.statuses()[0].id))
     assert repo.bone(cause).status_id == st.id
+
+
+def test_deleting_bone_keeps_task_unlinked(repo):
+    cause = repo.add_bone(repo.bones()[0].id, "c").id
+    t = repo.add_task("t", [cause])
+    snap = repo.delete_bone(cause)
+    assert repo.task(t).bone_ids == []
+    repo.restore_subtree(snap)
+    assert repo.task(t).bone_ids == [cause]
+
+
+def test_delete_bone_undo_redo_cycles_links(repo):
+    cat = repo.bones()[0].id
+    a = repo.add_bone(cat, "a").id
+    a1 = repo.add_bone(a, "a1").id
+    b = repo.add_bone(cat, "b").id
+    t = repo.add_task("t", [a1, b])
+    for _ in range(3):
+        snap = repo.delete_bone(a)
+        assert repo.task(t).bone_ids == [b]
+        repo.restore_subtree(snap)
+        assert sorted(repo.task(t).bone_ids) == sorted([a1, b])
+    assert repo.conn.execute("SELECT count(*) FROM task_bone").fetchone()[0] == 2

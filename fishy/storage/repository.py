@@ -584,7 +584,11 @@ class Repository:
             atts = [dict(r) for r in self.conn.execute(
                 f"SELECT * FROM attachment WHERE log_entry_id IN ({emarks}) ORDER BY id",
                 entry_ids)]
-        return {"bones": [by_id[i] for i in ids], "log_entries": entries, "attachments": atts}
+        links = [dict(r) for r in self.conn.execute(
+            f"SELECT * FROM task_bone WHERE bone_id IN ({marks}) ORDER BY created_at, rowid",
+            ids)]
+        return {"bones": [by_id[i] for i in ids], "log_entries": entries, "attachments": atts,
+                "task_links": links}
 
     def restore_subtree(self, snap: Snapshot) -> None:
         with self.tx():
@@ -603,6 +607,10 @@ class Repository:
                 self._insert_row("log_entry", row)
             for row in snap["attachments"]:
                 self._insert_row("attachment", row)
+            for row in snap.get("task_links", []):
+                if self.conn.execute("SELECT 1 FROM task WHERE id = ?",
+                                     (row["task_id"],)).fetchone():
+                    self._insert_row("task_bone", row)
             self._history("restore", "bone", root["id"], None, {"bones": len(snap["bones"])})
 
     def _open_gap(self, parent_id: int | None, index: int, exclude: int | None = None) -> None:
