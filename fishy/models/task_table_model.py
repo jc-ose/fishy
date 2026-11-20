@@ -64,9 +64,16 @@ class TaskTableModel(QAbstractTableModel):
         doc.choicesChanged.connect(self.reload)
 
     def reload(self, *_args) -> None:
-        self.beginResetModel()
-        self._ids = sorted(self.doc.tasks)
-        self.endResetModel()
+        """Pick up document changes. A full reset only when tasks were added or removed:
+        a reset destroys any open cell editor, and edits commit from inside one."""
+        ids = sorted(self.doc.tasks)
+        if ids != self._ids:
+            self.beginResetModel()
+            self._ids = ids
+            self.endResetModel()
+        elif ids:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(len(ids) - 1, len(TaskCol) - 1))
 
     def task_id(self, row: int) -> int:
         return self._ids[row]

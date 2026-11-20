@@ -182,6 +182,7 @@ class EntryEditor(QDialog):
     """Add or edit one evidence entry, with live preview (FR-5.5)."""
 
     PREVIEW_DELAY_MS = 250
+    HINT_RESET_MS = 4000
     HINT = ("Ctrl+Enter saves. Escape cancels; images and tasks added here are discarded "
             "if you cancel.")
 
@@ -303,7 +304,8 @@ class EntryEditor(QDialog):
                                          cursor.selectionEnd())
         if not count:
             self.hint.setText("No checkbox lines here. Put the cursor on a “- [ ]” line.")
-            QTimer.singleShot(4000, lambda: self.hint.setText(self.HINT))
+            QTimer.singleShot(self.HINT_RESET_MS, self.hint,  # cancelled if the editor goes
+                              lambda: self.hint.setText(self.HINT))
             return 0
         pos = cursor.position()
         doc_cursor = QTextCursor(self.source.document())
