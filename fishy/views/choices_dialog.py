@@ -346,7 +346,7 @@ class ChoicesDialog(QDialog):
         super().__init__(parent)
         self.doc = doc
         self.settings = settings
-        self.setWindowTitle("Levels & statuses")
+        self.setWindowTitle("Definitions")
         self.resize(720, 460)
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()

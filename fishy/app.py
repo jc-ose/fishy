@@ -291,8 +291,8 @@ class MainWindow(QMainWindow):
         self.legend_pos.activated.connect(self._legend_moved)
         bar2.addWidget(self.legend_pos)
         bar2.addSeparator()
-        self.choices_act = self._act("Levels && statuses…", self.edit_choices,
-                                     tip="Edit level and status names, colors and order")
+        self.choices_act = self._act("Definitions", self.edit_choices,
+                                     tip="Edit level and status names, task states, colors and order")
         bar2.addAction(self.choices_act)
         self.timeline_act = self._act("Timeline", self.show_timeline, "Ctrl+T",
                                       tip="Every evidence entry in the project, by date")
