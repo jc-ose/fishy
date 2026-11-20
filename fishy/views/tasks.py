@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from PySide6.QtCore import QDate, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -260,7 +261,7 @@ class TaskEditor(QDialog):
             self.title.setText(task.title)
         self.state.clear()
         for st in self.doc.ordered_task_states():
-            self.state.addItem(f"{st.symbol}  {st.name}", st.id)
+            self.state.addItem(theme.glyph_icon(st.symbol, st.color, 18), st.name, st.id)
         self.state.setCurrentIndex(self.state.findData(task.state_id))
         self.assignee.clear()
         self.assignee.addItems(self.doc.assignees())
@@ -439,7 +440,7 @@ class BoneTasksSection(QWidget):
         self._shown_open: set[int] = set()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 6, 0, 0)
+        layout.setContentsMargins(0, 8, 0, 12)  # breathing room above the evidence log
         head = QHBoxLayout()
         self.header = QLabel("Tasks")
         self.header.setStyleSheet("font-weight: 600;")
@@ -466,7 +467,8 @@ class BoneTasksSection(QWidget):
         self.list.setRootIsDecorated(False)
         self.list.setIndentation(0)
         self.list.setUniformRowHeights(True)
-        self.list.setMaximumHeight(180)
+        self.list.setIconSize(QSize(20, 20))
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
         self.list.itemClicked.connect(self._clicked)
@@ -477,6 +479,14 @@ class BoneTasksSection(QWidget):
         for col in (self.COL_SYMBOL, self.COL_ASSIGNEE, self.COL_DUE, self.COL_FLAG):
             header.setSectionResizeMode(col, header.ResizeMode.ResizeToContents)
         layout.addWidget(self.list)
+        self.empty_label = QLabel()
+        theme.mark(self.empty_label, muted=True)
+        layout.addWidget(self.empty_label)
+        self.separator = QFrame()
+        self.separator.setFrameShape(QFrame.Shape.HLine)
+        theme.mark(self.separator, separator=True)
+        layout.addSpacing(4)
+        layout.addWidget(self.separator)
         QShortcut(QKeySequence("Ctrl+Shift+Return"), self.list, activated=self.cycle_current,
                   context=Qt.ShortcutContext.WidgetShortcut)
         self._fade_timer = QTimer(self, singleShot=True, interval=self.FADE_MS)
@@ -545,17 +555,39 @@ class BoneTasksSection(QWidget):
                 head.setFirstColumnSpanned(False)
             for t in rows:
                 self.list.addTopLevelItem(self._row(t, faded=t in self._fading))
-        self.list.setVisible(self.list.topLevelItemCount() > 0)
+        rows = self.list.topLevelItemCount()
+        self.list.setVisible(rows > 0)
+        self._fit_list_height(rows)
+        is_cat = doc.tree.bones[bid].is_category
+        if rows:
+            self.empty_label.hide()
+        else:
+            self.empty_label.setText(
+                "All tasks are done." if all_ids else
+                "No tasks on this category or its causes yet." if is_cat else
+                "No tasks linked to this bone yet.")
+            self.empty_label.show()
+
+    MAX_ROWS = 8
+
+    def _fit_list_height(self, rows: int) -> None:
+        """Size the list to its rows (up to MAX_ROWS, then it scrolls): no empty box."""
+        if not rows:
+            return
+        row_h = max(self.list.sizeHintForRow(0), self.list.iconSize().height() + 6)
+        frame = 2 * self.list.frameWidth()
+        self.list.setFixedHeight(min(rows, self.MAX_ROWS) * row_h + frame + 2)
 
     def _row(self, task_id: int, faded: bool) -> QTreeWidgetItem:
         doc = self.doc
         task = doc.tasks[task_id]
         st = doc.task_states.get(task.state_id)
         done = doc.is_task_done(task_id)
-        item = QTreeWidgetItem([st.symbol if st else "☐", task.title, task.assignee or "—",
+        item = QTreeWidgetItem(["", task.title, task.assignee or "—",
                                 task.due_date or "", "⚑" if task.critical else ""])
         item.setData(self.COL_SYMBOL, Qt.ItemDataRole.UserRole, task_id)
-        item.setForeground(self.COL_SYMBOL, QBrush(QColor(st.color if st else MUTED_COLOR)))
+        item.setIcon(self.COL_SYMBOL, theme.glyph_icon(st.symbol if st else "☐",
+                                                       st.color if st else MUTED_COLOR, 20))
         item.setToolTip(self.COL_SYMBOL, f"{st.name if st else ''} — click to toggle, "
                         "right-click for all states")
         item.setToolTip(self.COL_TITLE, task.notes or task.title)
@@ -754,6 +786,7 @@ class TasksWindow(QDialog):
                                    | QAbstractItemView.EditTrigger.EditKeyPressed)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
+        self.table.setIconSize(QSize(20, 20))
         self.table.setItemDelegateForColumn(TaskCol.ASSIGNEE, _AssigneeDelegate(doc, self))
         self.table.setItemDelegateForColumn(TaskCol.DUE, _DueDelegate(self))
         header = self.table.horizontalHeader()

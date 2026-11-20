@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 MODES = ("system", "light", "dark")
@@ -100,6 +100,32 @@ QFrame#entryCard {{ background: {t.card}; border: 1px solid {t.border}; border-r
 QFrame#entryCard[highlight="true"] {{ border: 1px solid {t.accent}; }}
 QToolTip {{ color: {t.text}; background: {t.tooltip_base}; border: 1px solid {t.border}; }}
 """
+
+
+_glyph_cache: dict[tuple[str, str, int], QIcon] = {}
+
+
+def glyph_icon(symbol: str, color: str, px: int = 20) -> QIcon:
+    """A task-state symbol drawn as a bold, colored icon (sharp on HiDPI screens)."""
+    key = (symbol, color, px)
+    icon = _glyph_cache.get(key)
+    if icon is None:
+        scale = 2  # draw at 2x and let Qt scale down for crisp edges
+        pix = QPixmap(px * scale, px * scale)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        font = QFont()
+        font.setPixelSize(round(px * scale * 0.95))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, symbol)
+        painter.end()
+        pix.setDevicePixelRatio(scale)
+        icon = _glyph_cache[key] = QIcon(pix)
+    return icon
 
 
 def mark(widget: QWidget, **props: bool) -> QWidget:

@@ -20,6 +20,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QFont
 
+from fishy import theme
 from fishy.document import ProjectDocument
 from fishy.domain.tasks import number_sort_key
 from fishy.models.bone_tree_model import local_time
@@ -122,7 +123,7 @@ class TaskTableModel(QAbstractTableModel):
             if col is TaskCol.ID:
                 return f"#{tid}"
             if col is TaskCol.STATE:
-                return f"{st.symbol}  {st.name}" if st else ""
+                return st.name if st else ""
             if col is TaskCol.TITLE:
                 return task.title
             if col is TaskCol.BONES:
@@ -164,6 +165,8 @@ class TaskTableModel(QAbstractTableModel):
                 return int(not task.critical)
             if col is TaskCol.UPDATED:
                 return task.updated_at
+        if role == Qt.ItemDataRole.DecorationRole and col is TaskCol.STATE and st:
+            return theme.glyph_icon(st.symbol, st.color, 20)
         if role == Qt.ItemDataRole.ForegroundRole:
             if col is TaskCol.STATE and st:
                 return QBrush(QColor(st.color))

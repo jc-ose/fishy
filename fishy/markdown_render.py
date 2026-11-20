@@ -170,7 +170,8 @@ def _render_task_ref(self, tokens, idx, options, env) -> str:
     if info is None:
         return f"<s>deleted task #{task_id}</s>"
     symbol = (f'<a href="{TASK_TOGGLE_SCHEME}:{task_id}" style="color: {html.escape(info.color)}; '
-              f'text-decoration: none;">{html.escape(info.symbol)}</a>')
+              f'text-decoration: none; font-size: x-large; font-weight: bold;">'
+              f'{html.escape(info.symbol)}</a>')
     title = f'<a href="{TASK_SCHEME}:{task_id}">{html.escape(info.title)}</a>'
     return f"{symbol} {'<s>' + title + '</s>' if info.done else title}"
 

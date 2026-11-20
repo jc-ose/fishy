@@ -11,8 +11,8 @@ INFO = {14: TaskInfo("◐", "#1e88e5", "Pull records", False),
 
 def test_task_ref_renders_symbol_and_title_links():
     out = render("- [[task:14]]\n- [[task:15]]\n- [[task:99]]", task_label=INFO.get)
-    assert ('<a href="fishy-task-toggle:14" style="color: #1e88e5; text-decoration: none;">◐</a>'
-            in out)
+    assert ('<a href="fishy-task-toggle:14" style="color: #1e88e5; text-decoration: none; '
+            'font-size: x-large; font-weight: bold;">◐</a>' in out)
     assert '<a href="fishy-task:14">Pull records</a>' in out
     assert '<s><a href="fishy-task:15">Call vendor</a></s>' in out
     assert "<s>deleted task #99</s>" in out
