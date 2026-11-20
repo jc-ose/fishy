@@ -269,7 +269,7 @@ class TaskEditor(QDialog):
         self.due.setEnabled(task.due_date is not None)
         if task.due_date:
             self.due.setDate(QDate.fromString(task.due_date, "yyyy-MM-dd"))
-        elif self.due.date() == self.due.minimumDate():
+        else:  # unticking "No date" starts from today
             self.due.setDate(QDate.currentDate())
         self.critical.setChecked(task.critical)
         if not self.notes.hasFocus():
@@ -363,24 +363,40 @@ class TaskEditor(QDialog):
         super().done(result)
 
 
-_open_editors: dict[tuple[int, int], TaskEditor] = {}
+_open_editors: dict[tuple[ProjectDocument, int], TaskEditor] = {}
+
+
+def main_window_of(widget: QWidget | None) -> QWidget | None:
+    """The main window (the one with `select_bone`) above `widget`, across dialogs."""
+    w = widget
+    while w is not None:
+        if hasattr(w, "select_bone") and hasattr(w, "open_entry"):
+            return w
+        w = w.parentWidget()
+    return None
+
+
+def close_task_editors(doc: ProjectDocument) -> None:
+    """Close (saving typed text) every task editor of `doc`, e.g. before it closes."""
+    for key in [k for k in _open_editors if k[0] is doc]:
+        ed = _open_editors.pop(key)
+        ed.done(QDialog.DialogCode.Rejected)
 
 
 def open_task_editor(doc: ProjectDocument, task_id: int, parent: QWidget | None) -> TaskEditor:
     """Show (or raise) the one editor for this task. Wires bone/entry navigation to the
     main window when `parent` lives in one."""
-    key = (id(doc), task_id)
+    key = (doc, task_id)
     ed = _open_editors.get(key)
     if ed is None:
-        ed = TaskEditor(doc, task_id, parent.window() if parent is not None else None)
+        win = main_window_of(parent)
+        ed = TaskEditor(doc, task_id, win or (parent.window() if parent else None))
         ed.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         _open_editors[key] = ed
         ed.destroyed.connect(lambda *_: _open_editors.pop(key, None))
         ed.finished.connect(lambda *_: _open_editors.pop(key, None))
-        win = parent.window() if parent is not None else None
-        if win is not None and hasattr(win, "select_bone"):
+        if win is not None:
             ed.boneClicked.connect(win.select_bone)
-        if win is not None and hasattr(win, "open_entry"):
             ed.openEntry.connect(win.open_entry)
     ed.show()
     ed.raise_()
@@ -685,8 +701,7 @@ class _DueDelegate(QStyledItemDelegate):
 
     def setEditorData(self, editor, index) -> None:
         value = index.data(Qt.ItemDataRole.EditRole)
-        editor.setDate(value if isinstance(value, QDate) and value.isValid()
-                       else QDate.currentDate())
+        editor.setDate(value if isinstance(value, QDate) and value.isValid() else NO_DATE)
 
     def setModelData(self, editor, model, index) -> None:
         date = editor.date()
@@ -752,6 +767,9 @@ class TasksWindow(QDialog):
         self.table.clicked.connect(self._clicked)
         self.table.doubleClicked.connect(self._double_clicked)
         self.table.selectionModel().currentRowChanged.connect(self._row_changed)
+        self._keep: int | None = None
+        self.model.modelAboutToBeReset.connect(self._remember_current)
+        self.model.modelReset.connect(self._restore_current)
         QShortcut(QKeySequence("Ctrl+Shift+Return"), self.table, activated=self.cycle_current,
                   context=Qt.ShortcutContext.WidgetShortcut)
         layout.addWidget(self.table, 1)
@@ -813,6 +831,21 @@ class TasksWindow(QDialog):
     def current_task(self) -> int | None:
         return self._task_at(self.table.currentIndex())
 
+    def _remember_current(self) -> None:
+        self._keep = self.current_task()
+
+    def _restore_current(self) -> None:
+        if self._keep is None or self._keep not in self.doc.tasks:
+            return
+        row = self.model.row_for(self._keep)
+        col = max(self.table.currentIndex().column(), 0)
+        index = self.proxy.mapFromSource(self.model.index(row, col))
+        if index.isValid():
+            self.table.selectionModel().blockSignals(True)
+            self.table.setCurrentIndex(index)
+            self.table.selectionModel().blockSignals(False)
+            self.table.scrollTo(index)
+
     def _clicked(self, index) -> None:
         from fishy.models.task_table_model import TaskCol
 
@@ -836,8 +869,7 @@ class TasksWindow(QDialog):
 
     def open_task(self, task_id: int) -> None:
         ed = open_task_editor(self.doc, task_id, self)
-        win = self.parent().window() if self.parent() is not None else None
-        if win is None or not hasattr(win, "select_bone"):
+        if main_window_of(self) is None:  # standalone window: let the caller navigate
             ed.boneClicked.connect(self.boneSelected)
             ed.openEntry.connect(self.openEntry)
 
@@ -852,12 +884,20 @@ class TasksWindow(QDialog):
             self.open_task(task_id)
 
     def export_csv(self) -> None:
-        from fishy.export.data import write_tasks_csv
+        from fishy.export import data
 
         path, _ = QFileDialog.getSaveFileName(self, "Export tasks", "tasks.csv",
                                               "CSV (*.csv)")
-        if path:
-            write_tasks_csv(self.doc, path, self.proxy.visible_task_ids())
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            data.write_tasks_csv(self.doc, path, self.proxy.visible_task_ids())
+        except OSError as exc:
+            QMessageBox.warning(self, "Export tasks",
+                                f"Couldn't write {path}:\n{exc}\n\nIs it open in another "
+                                "program (e.g. Excel)?")
 
     def _context_menu(self, pos) -> None:
         index = self.table.indexAt(pos)

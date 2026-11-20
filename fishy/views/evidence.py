@@ -655,20 +655,32 @@ class EvidenceLog(QWidget):
         if not self.doc or self.bone_id is None:
             return None
         editor = EntryEditor(self.doc, self.bone_id, parent=self.window())
-        if editor.exec() != QDialog.DialogCode.Accepted:
+        try:
+            while editor.exec() == QDialog.DialogCode.Accepted:
+                entry_id = self.doc.save_log_entry(self.bone_id, None, editor.body(),
+                                                   editor.entry_title(),
+                                                   editor.new_attachments)
+                if entry_id is not None:
+                    return entry_id
+                # Rejected by a rule (the message is in the status bar): keep the text.
             return None
-        return self.doc.save_log_entry(self.bone_id, None, editor.body(),
-                                       editor.entry_title(), editor.new_attachments)
+        finally:
+            editor.deleteLater()
 
     def edit_entry(self, entry_id: int) -> bool:
         if not self.doc:
             return False
         entry = self.doc.repo.log_entry(entry_id)
         editor = EntryEditor(self.doc, entry.bone_id, entry, parent=self.window())
-        if editor.exec() != QDialog.DialogCode.Accepted:
+        try:
+            while editor.exec() == QDialog.DialogCode.Accepted:
+                if self.doc.save_log_entry(entry.bone_id, entry_id, editor.body(),
+                                           editor.entry_title(),
+                                           editor.new_attachments) is not None:
+                    return True
             return False
-        return self.doc.save_log_entry(entry.bone_id, entry_id, editor.body(),
-                                       editor.entry_title(), editor.new_attachments) is not None
+        finally:
+            editor.deleteLater()
 
     def delete_entry(self, entry_id: int) -> None:
         if not self.doc:

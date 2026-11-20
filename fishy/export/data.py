@@ -197,10 +197,18 @@ def task_rows(doc: ProjectDocument, task_ids: list[int] | None = None) -> list[l
     return rows
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value: str) -> str:
+    """Prefix text Excel would run as a formula (e.g. "-40 °C soak") with an apostrophe."""
+    return "'" + value if value.startswith(_FORMULA_START) else value
+
+
 def write_tasks_csv(doc: ProjectDocument, path: str | Path,
                     task_ids: list[int] | None = None) -> None:
     """Tasks as CSV: UTF-8 with BOM and CRLF, so Excel reads glyphs and accents."""
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f, lineterminator="\r\n")
         writer.writerow(CSV_COLUMNS)
-        writer.writerows(task_rows(doc, task_ids))
+        writer.writerows([_safe_cell(c) for c in row] for row in task_rows(doc, task_ids))

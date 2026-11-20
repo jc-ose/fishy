@@ -366,6 +366,9 @@ class MainWindow(QMainWindow):
 
     def _set_doc(self, doc: ProjectDocument | None, lock: ProjectLock | None = None) -> None:
         if self.doc is not None:
+            from fishy.views.tasks import close_task_editors
+
+            close_task_editors(self.doc)  # they save typed text, so before the file closes
             self.details.set_document(None)
             self.doc.close()
             self.doc.deleteLater()
@@ -763,7 +766,13 @@ class MainWindow(QMainWindow):
         if self.doc and (path := self._data_path("Export tasks as CSV", ".csv",
                                                  "CSV (*.csv)")):
             self.details._flush()
-            write_tasks_csv(self.doc, path)
+            try:
+                write_tasks_csv(self.doc, path)
+            except OSError as exc:
+                QMessageBox.warning(self, "Export tasks",
+                                    f"Couldn't write {path}:\n{exc}\n\nIs it open in another "
+                                    "program (e.g. Excel)?")
+                return
             self.statusBar().showMessage(f"Exported {len(self.doc.tasks)} tasks to {path}",
                                          5000)
 

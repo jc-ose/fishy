@@ -195,7 +195,7 @@ def test_task_editor_closes_when_task_deleted(qtbot, doc):
     ed = open_task_editor(doc, t, None)  # deletes itself on close
     assert open_task_editor(doc, t, None) is ed  # one editor per task
     doc.delete_task(t)
-    assert (id(doc), t) not in _open_editors
+    assert (doc, t) not in _open_editors
 
 
 def _section(qtbot, doc, settings, bone_id):

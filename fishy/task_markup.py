@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import re
 
-CHECKBOX_LINE = re.compile(r"^(\s*)([-*+])\s+\[( |x|X)\]\s+(.+)$")
-PENDING_LINE = re.compile(r"^(\s*)([-*+]) \[\[task:new(:x)?\]\] (.+)$", re.M)
+CHECKBOX_LINE = re.compile(r"^(\s*)([-*+])\s+\[( |x|X)\]\s+(\S.*)$")
+PENDING_LINE = re.compile(r"^(\s*)([-*+]) \[\[task:new(:x)?\]\] (\S.*)$", re.M)
 
 
 def convert_checkboxes(text: str, start: int, end: int) -> tuple[str, int]:
