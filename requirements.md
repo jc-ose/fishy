@@ -1,13 +1,14 @@
 # App: fishy (name may change)
 
-> Status: **v1 complete (v0.12)** — v0.3 added decisions on Status, log entries, theming and layout;
+> Status: **v1 complete + tasks (v0.13)** — v0.3 added decisions on Status, log entries, theming and layout;
 > v0.4 added level roll-up, categories, user identity, sizing, platform and scope decisions;
 > v0.5 settled category logs, level pinning and parent status (§11.1); v0.6 recorded
 > implementation decisions from milestones 1–2 (§10.1); v0.7 added the agreed keyboard map
 > (UI-6) and diagram reading order (FR-2.2); v0.8 recorded milestone 4 (schema v2, legend,
 > markers); v0.9 records milestone 5 (evidence log; FR-1.3, §4.5, §10.1, §12); v0.10 records
 > light/dark theming, done early (UI-1, §10.1); v0.11 records milestone 6 (export; §4.8, §10.1);
-> v0.12 records milestone 7 (filter, settings, recent files, open-twice warning). Items marked
+> v0.12 records milestone 7 (filter, settings, recent files, open-twice warning); v0.13 records
+> milestone 8 (tasks: §4.9, UI-3, §10.1, Q17–Q21). Items marked
 > **[Proposed]** are minor suggestions that can be confirmed during implementation.
 
 ---
@@ -61,6 +62,8 @@ The app provides two primary interfaces that always stay in sync:
 | **Status** | Progress of the investigation of a bone: Not Started, In Progress, Blocked, Under Review, Complete. Separate from Level, and does not drive bone color. |
 | **Log entry** | A timestamped markdown section of the investigation under a bone (findings, evidence, analysis). Read in order, entries can also serve as a progress history. |
 | **Attachment** | An image or file referenced by a log entry, stored inside the project file. |
+| **Task** | An action item with a stable id, a state, optional assignee, due date and critical flag. Links to zero or more bones (§4.9). |
+| **Task state** | A configurable state of a task (To do, In progress, Blocked, Done, …), drawn as the task's checkbox symbol. |
 
 ## 4. Functional Requirements
 
@@ -157,11 +160,45 @@ The app provides two primary interfaces that always stay in sync:
 - **FR-8.5** Export bone data to text (as a bulleted list, tabbed by depth) or the full project to JSON (for interchange and backup).
 - *(Done in milestone 6.)* Also: the outline can be copied straight to the clipboard; the JSON includes images as base64 (optional) and computed numbers and rolled-up levels; legend and status-dot defaults come from the project, other export choices are remembered app-wide.
 
+### 4.9 Tasks
+
+Design: `docs/superpowers/specs/2026-11-19-tasks-design.md`.
+
+- **FR-9.1** A task is its own record with a stable id (never reused). Fields: title (required),
+  notes (plain text), state, assignee (free text), due date (date only), critical flag, plus
+  timestamp and user stamps. It links to **zero or more** bones, categories included.
+- **FR-9.2** Task states are configurable in the Levels & statuses dialog (tab *Task states*):
+  name, color, symbol (the checkbox glyph), role, default, order. Defaults: To do ☐, In
+  progress ◐, Blocked ⊘, Done ☑. At least one state must have the *done* role.
+- **FR-9.3** A task is *open* unless its state's role is done; *overdue* when open and its due
+  date is before today's local date.
+- **FR-9.4** Checkbox interaction everywhere: click toggles open ↔ done (first done state /
+  default state); right-click picks any state; Ctrl+Shift+Enter cycles in state order.
+- **FR-9.5** Each bone's details panel has a **Tasks** section (open first, then by due date).
+  Done tasks are hidden behind a *Show done (N)* toggle (an app setting); a task just marked
+  done fades out after a moment. Categories also list their causes' tasks, grouped by cause,
+  each task once. **+ Add** and **Link existing…** create or attach tasks.
+- **FR-9.6** Deleting a bone removes only its links; its tasks stay (unlinked tasks show only
+  in the Tasks window). Undo restores the links. Deleting a task asks first if log entries
+  reference it; references then render as *deleted task #N*.
+- **FR-9.7** Log entries reference tasks with `[[task:N]]` (editor: **Link task…**), rendered
+  as the live checkbox and title. **Convert to task** in the entry editor turns `- [ ]` /
+  `- [x]` lines into tasks linked to the bone when the entry is saved, as one undo step,
+  changing nothing else in the entry.
+- **FR-9.8** The **Tasks** window (Ctrl+Shift+T) lists every task: sortable columns (#, State,
+  Title, Bones, Assignee, Due, ⚑, Updated), in-place editing, filters (search, hide done,
+  assignee, critical, overdue, unlinked) and a summary line.
+- **FR-9.9** Tasks export to **CSV** (UTF-8 with BOM, CRLF) from the Tasks window (the rows
+  shown) or the Export menu (all tasks). The JSON export includes task states and tasks.
+- **FR-9.10** The bone grid has a **Tasks** column: open count, ⚑ if any open task is critical;
+  categories roll up their causes. Task states do not drive bone status; the diagram is
+  unchanged.
+
 ## 5. User Interface
 
 - **UI-1** A clean, modern look from simple theming: light and dark themes, one accent color, rounded surfaces, generous spacing, clear typography. Material Design is a source of inspiration, not a standard to follow. *(Done: System / Light / Dark, following the Windows setting live by default. The diagram canvas and legend stay white in both modes, like paper, to match exports.)*
 - **UI-2** Layout: a resizable **split view**, with the diagram on top or left and the data editor on the bottom or right. One click maximizes either pane, which gives tab-like behavior when wanted. Splitter position and orientation are remembered.
-- **UI-3** The data editor is a tree-grid (columns: Number, Title, Level, Status, # Log entries, Updated) beside or above a details panel for the selected bone.
+- **UI-3** The data editor is a tree-grid (columns: Number, Title, Level, Status, # Log entries, Tasks, Updated) beside or above a details panel for the selected bone.
 - **UI-4** Inline editing in the grid: title text, a level dropdown with color swatches, a status dropdown. Dropdowns list choices by name (never by id) and commit as soon as one is picked.
 - **UI-5** The two panes share a single selection model and are always in sync.
 - **UI-6** Keyboard-first editing in the tree (agreed map):
@@ -383,6 +420,15 @@ above in these deliberate ways:
   the folder is read-only, the project opens without a lock.
 - **Settings:** the display name, theme, new-project defaults and level template are app
   settings (per computer, in the registry); everything about a project stays in its file.
+- **Tasks (milestone 8, schema v3):** `003_tasks.sql` adds `task_state` (like `status`, plus
+  `symbol`), `task` (`AUTOINCREMENT` id) and `task_bone` (many-to-many, cascades from both
+  sides). The migration seeds the four default states, so v2 files upgrade on open with a
+  `.bak-v2` backup. The repository refuses to delete or re-role the last *done* state. Bone
+  snapshots carry their `task_bone` rows so undoing a bone delete relinks its tasks.
+  References are parsed by a markdown-it inline rule (so they stay literal inside code):
+  `[[task:N]]`, and `[[task:new]]` / `[[task:new:x]]` for checkbox lines waiting to become
+  tasks on save (`fishy/task_markup.py`). The show-done toggle is an app setting
+  (`tasks/show_done`).
 
 ## 11. Decisions
 
@@ -406,6 +452,11 @@ above in these deliberate ways:
 | Q14 | Do categories have an evidence log? | No. Categories have a title and description only (FR-1a.4). |
 | Q15 | Can a parent cause be pinned to a manual level? | Yes, with a visible pin marker; categories can't be pinned (FR-3.7). |
 | Q16 | Do parent causes roll up status? | Not in v1; set manually. Rule-based roll-up (Blocked if any child blocked, Complete if all complete, etc.) is planned for the future (FR-3a.7, FR-3a.8). |
+| Q17 | What happens to a deleted bone's tasks? | They stay, unlinked, visible in the Tasks window (FR-9.6). |
+| Q18 | Existing `- [ ]` lines in entries? | A *Convert to task* action, non-disruptive to the entry (FR-9.7). |
+| Q19 | Assignee? | Free text with suggestions from names already used (FR-9.1). |
+| Q20 | Where does the all-tasks list live? | A separate non-modal window, like the Timeline (FR-9.8). |
+| Q21 | Do categories show their causes' tasks? | Yes: grid count and Tasks section roll up (FR-9.5, FR-9.10). Parent causes don't. |
 
 ### 11.2 Open
 
@@ -420,3 +471,4 @@ No open questions. Remaining **[Proposed]** items are minor and can be settled d
 5. ✅ **Evidence log** — Markdown edit/preview, syntax highlighting, image paste/preview.
 6. ✅ **Export** — PNG/SVG/PDF with title block and legend; clipboard; outline text and JSON.
 7. ✅ **Polish** — Light/dark theme (done early, after M5: System/Light/Dark, follows Windows live; diagram canvas stays white), filter by text/level/status (UI-7), Settings (UI-8), recent files (FR-7.6), open-twice warning (FR-7.7). (Packaging/installer is future work, NFR-5; v1 runs directly from Python.)
+8. ✅ **Tasks** — Task records, states, links, `[[task:N]]`, convert-to-task, per-bone section, Tasks window, CSV (§4.9).

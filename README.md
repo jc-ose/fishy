@@ -23,6 +23,10 @@ See [requirements.md](requirements.md) for the full specification.
 - **Milestone 7, polish: done.** Filter by text, level and status (the diagram fades the
   rest); light and dark themes; a Settings dialog (your name, theme, new-project defaults);
   recent projects; and a warning when a project is already open somewhere else.
+- **Milestone 8, tasks: done.** Action items as real records: configurable task states with
+  their own checkbox symbols, links to any number of bones, `[[task:N]]` references in entries,
+  *Convert to task* for existing checkboxes, a Tasks section per bone, a sortable and editable
+  Tasks window, and CSV export. Adds schema v3 (older files upgrade with a backup).
 
 All v1 milestones are complete. Next candidates (see requirements §1.2): packaging as an
 installer, a full investigation report, status roll-up rules.
@@ -82,12 +86,34 @@ preview beside the editor:
   are stored inside the `.fishy` file. Click one in an entry to see it full size or save it.
 - **Links to bones:** **Link bone…** inserts `[[bone:N]]`, which always shows the bone's current
   number and title. Click it to jump there.
-- Ctrl+Enter saves. Cancelling discards any images you added.
+- **Links to tasks:** **Link task…** inserts `[[task:N]]`, shown as the task's live checkbox and
+  title. Click the checkbox to toggle it, right-click for every state, click the title to edit
+  the task.
+- **Convert to task:** put the cursor on a `- [ ]` line (or select several) and press
+  **Convert to task**. When you save, each becomes a task linked to this cause and the line
+  becomes its reference; nothing else in the entry changes. `- [x]` lines become done tasks.
+- Ctrl+Enter saves. Cancelling discards any images or pending tasks you added.
 
 Each entry is a card showing its author and time (and who last edited it). Cards can be
 collapsed to a single line, reordered with ▲/▼ in **Manual order**, or shown **By date**.
 **Timeline** (Ctrl+T) lists every entry in the project in date order; double-click one to jump
 to it.
+
+### Tasks
+
+Each bone's details panel has a **Tasks** section: **+ Add** creates a task linked to the bone,
+**Link existing…** attaches one from elsewhere. A task can link to any number of bones; a
+category also lists the tasks of its causes, grouped by cause. Click a checkbox to toggle
+done, right-click it for every state, Ctrl+Shift+Enter cycles states, double-click to edit
+(title, state, assignee, due date, critical, notes, linked bones, and the entries that
+reference it). Done tasks are hidden until you press **Show done**. Overdue dates are red;
+⚑ marks critical tasks. The grid's **Tasks** column shows each bone's open count.
+
+**Tasks** (Ctrl+Shift+T) opens every task in one window: sort by any column, edit in place,
+filter by text, assignee, critical, overdue or unlinked, and **Export CSV…** (the rows shown).
+**Export ▾ → Export tasks (CSV)…** exports all of them. Deleting a bone keeps its tasks, unlinked.
+Task states (names, colors, checkbox symbols, which ones count as done) are edited on the
+**Task states** tab of **Levels & statuses…**.
 
 ### Levels, statuses and the legend
 
@@ -157,14 +183,16 @@ it. Exports ignore the filter, and it isn't saved with the project.
 
 ```
 fishy/
-  domain/              # dataclasses + pure rules: numbering, level roll-up, status summaries
+  domain/              # dataclasses + pure rules: numbering, level roll-up, status summaries,
+                       #   tasks.py (open/overdue, toggle/cycle, category task roll-up)
   storage/
-    schema/            # 001_init.sql (v1), 002_display_settings.sql (v2)
+    schema/            # 001_init.sql (v1), 002_display_settings.sql (v2), 003_tasks.sql (v3)
     db.py              # connect, migrate (with backup), integrity checks
     repository.py      # the only code that touches SQL; transactions, stamps, history
   document.py          # ProjectDocument: the single mutation path; undo commands
   models/
     bone_tree_model.py # QAbstractItemModel over the document's caches
+    task_table_model.py  # Tasks window table model + filter/sort proxy
   layout/              # pure Python, no Qt: tree in -> positioned lines/labels out
   views/
     diagram_view.py    # QGraphicsScene/View renderer: zoom, pan, select, export
@@ -174,24 +202,26 @@ fishy/
     legend.py          # diagram legend (levels + definitions, status key)
     evidence.py        # evidence log cards, entry editor, image viewer, timeline
     markdown_view.py   # QTextBrowser that renders entries and loads project images
-  markdown_render.py   # Markdown -> HTML (tables, task lists, Pygments, bone links); no Qt
+    tasks.py           # task state menu, pickers, task editor, per-bone section, Tasks window
+  markdown_render.py   # Markdown -> HTML (tables, task lists, Pygments, bone/task links); no Qt
+  task_markup.py       # "Convert to task": checkbox lines -> pending -> [[task:N]]; no Qt
   theme.py             # light/dark palettes + stylesheet; follows the OS setting
   filtering.py         # filter rules (text / level / status), no Qt
   project_lock.py      # "already open elsewhere" lock file (FR-7.7)
   export/
     diagram.py         # off-screen export scene, title block, PNG/SVG/PDF/clipboard rendering
-    data.py            # outline text and project JSON
+    data.py            # outline text, project JSON, tasks CSV
   views/export_dialog.py  # export dialog with live preview
   views/filter_panel.py   # filter drop-down
   views/settings_dialog.py  # Settings (UI-8)
   app.py               # main window: panes, toolbars, selection sync, context menus
   demo.py              # milestone 1 layout demo
   samples.py           # sample investigations
-tests/                 # 172 tests: layout geometry, storage + migrations, undo fuzzing,
+tests/                 # 242 tests: layout geometry, storage + migrations, undo fuzzing,
                        #   Qt model checks, keyboard editing, drag-and-drop, details panel,
                        #   levels & statuses editor, legend, exports, markdown, evidence,
                        #   theme contrast and live switching, exports, filter, settings,
-                       #   recent projects, locking
+                       #   recent projects, locking, tasks
 ```
 
 ### Data flow
