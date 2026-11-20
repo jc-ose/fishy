@@ -36,10 +36,11 @@ class Col(IntEnum):
     STATUS = 3
     LOG = 4
     UPDATED = 5
+    TASKS = 6  # shown after Log (the view reorders sections)
 
 
 HEADERS = {Col.TITLE: "Title", Col.NUMBER: "#", Col.LEVEL: "Level", Col.STATUS: "Status",
-           Col.LOG: "Log", Col.UPDATED: "Updated"}
+           Col.LOG: "Log", Col.UPDATED: "Updated", Col.TASKS: "Tasks"}
 
 BoneIdRole = Qt.ItemDataRole.UserRole + 1
 IsCategoryRole = Qt.ItemDataRole.UserRole + 2
@@ -172,6 +173,11 @@ class BoneTreeModel(QAbstractItemModel):
                 return "" if bone.is_category else doc.log_counts.get(bid, 0)
             if col is Col.UPDATED:
                 return local_time(bone.updated_at)
+            if col is Col.TASKS:
+                if role != Qt.ItemDataRole.DisplayRole:
+                    return None
+                n, critical = doc.open_task_info(bid)
+                return "" if not n else f"{n} ⚑" if critical else str(n)
 
         if role == Qt.ItemDataRole.DecorationRole:
             if col is Col.LEVEL:
@@ -187,6 +193,10 @@ class BoneTreeModel(QAbstractItemModel):
             if col is Col.UPDATED or doc.level_is_derived(bid):
                 return QColor(theme.current().muted)
 
+        if role == Qt.ItemDataRole.ToolTipRole and col is Col.TASKS:
+            titles = [doc.tasks[t].title for _, ids in doc.task_groups(bid) for t in ids
+                      if not doc.is_task_done(t)]
+            return "\n".join(f"☐ {t}" for t in titles) or None
         if role == Qt.ItemDataRole.ToolTipRole and col is Col.LEVEL:
             level = doc.effective_level(bid)
             if level:

@@ -368,3 +368,61 @@ def test_window_export_uses_visible_rows(qtbot, doc, tmp_path, monkeypatch):
     w.export_btn.click()
     text = path.read_bytes().decode("utf-8-sig")
     assert f"\r\n{a}," in text and f"\r\n{b}," not in text
+
+
+def test_grid_tasks_column(qtbot, doc):
+    from fishy.models.bone_tree_model import Col
+
+    cat = doc.tree.roots()[0]
+    c = doc.add_bone(cat, "c")
+    m = doc.model
+    assert m.headerData(Col.TASKS, Qt_Horizontal()) == "Tasks"
+    assert m.data(m.index_for(c, Col.TASKS)) == ""
+    doc.add_task("x", [c], critical=True)
+    doc.add_task("y", [c])
+    assert m.data(m.index_for(c, Col.TASKS)) == "2 ⚑"
+    assert m.data(m.index_for(cat, Col.TASKS)) == "2 ⚑"  # category rolls up
+    from PySide6.QtCore import Qt
+
+    assert "x" in m.data(m.index_for(c, Col.TASKS), Qt.ItemDataRole.ToolTipRole)
+
+
+def Qt_Horizontal():
+    from PySide6.QtCore import Qt
+
+    return Qt.Orientation.Horizontal
+
+
+def test_tasks_column_follows_log_column(qtbot, doc):
+    from fishy.models.bone_tree_model import Col
+    from fishy.views.bone_tree_view import BoneTreeView
+
+    view = BoneTreeView()
+    qtbot.addWidget(view)
+    view.attach(doc)
+    h = view.header()
+    assert h.visualIndex(Col.TASKS) == h.visualIndex(Col.LOG) + 1
+
+
+def test_main_window_tasks_window_and_csv(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QFileDialog
+
+    from fishy.app import MainWindow, create_sample_project
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    w = MainWindow(settings)
+    qtbot.addWidget(w)
+    w._set_doc(create_sample_project(tmp_path / "s.fishy"))
+    assert w.tasks_act.shortcut().toString() == "Ctrl+Shift+T"
+    t = w.doc.add_task("From window test", [w.doc.tree.roots()[0]])
+    w.tasks_act.trigger()
+    assert w.tasks_window is not None and w.tasks_window.isVisible()
+    assert t in w.tasks_window.proxy.visible_task_ids()
+    out = tmp_path / "all.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "CSV (*.csv)")))
+    w.tasks_csv_act.trigger()
+    assert "From window test" in out.read_text(encoding="utf-8-sig")
+    w._set_doc(None)
+    assert w.tasks_window is None and not w.tasks_act.isEnabled()

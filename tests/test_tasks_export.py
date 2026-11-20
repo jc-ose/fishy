@@ -39,3 +39,16 @@ def test_csv_respects_given_order(tmp_path, doc):
     write_tasks_csv(doc, p, [b, a])
     rows = list(csv.reader(io.StringIO(p.read_text(encoding="utf-8-sig"), newline="")))
     assert [r[0] for r in rows[1:]] == [str(b), str(a)]
+
+
+def test_json_includes_tasks(doc):
+    from fishy.export.data import project_dict
+
+    c = doc.add_bone(doc.tree.roots()[0], "c")
+    t = doc.add_task("x", [c], critical=True)
+    d = project_dict(doc, include_images=False)
+    assert d["tasks"][0]["id"] == t and d["tasks"][0]["bone_ids"] == [c]
+    assert d["tasks"][0]["critical"] is True and d["tasks"][0]["state"] == "To do"
+    assert len(d["task_states"]) == 4 and d["task_states"][3]["role"] == "done"
+    assert d["bones"][0]["children"][0]["task_ids"] == [t]
+    assert d["bones"][0]["task_ids"] == []

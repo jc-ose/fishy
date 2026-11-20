@@ -2,7 +2,7 @@
 
 The outline is for pasting into email, reports or slides: one bullet per bone,
 tabbed by depth. The JSON is for interchange and backup: everything in the
-project file (bones, levels, statuses, evidence, images, users), plus the
+project file (bones, levels, statuses, evidence, images, users, tasks), plus the
 computed numbers and rolled-up levels so other tools needn't recompute them.
 """
 
@@ -118,6 +118,7 @@ def project_dict(doc: ProjectDocument, include_images: bool = True) -> dict[str,
         else:
             out["log_entries"] = [entry_dict(e) for e in
                                   sorted(entries_by_bone.get(bid, []), key=lambda e: e.position)]
+        out["task_ids"] = sorted(doc.task_links.get(bid, set()))
         out["children"] = [bone_dict(k) for k in doc.tree.kids(bid)]
         return out
 
@@ -142,6 +143,16 @@ def project_dict(doc: ProjectDocument, include_images: bool = True) -> dict[str,
                      for st in doc.ordered_statuses()],
         "users": [{"id": u.id, "display_name": u.display_name, "account_name": u.account_name}
                   for u in users.values()],
+        "task_states": [{"id": st.id, "name": st.name, "color": st.color,
+                         "symbol": st.symbol, "role": str(st.role), "order": st.sort_order,
+                         "is_default": st.is_default} for st in doc.ordered_task_states()],
+        "tasks": [{"id": t.id, "title": t.title, "notes": t.notes, "state_id": t.state_id,
+                   "state": doc.task_states[t.state_id].name, "done": doc.is_task_done(t.id),
+                   "assignee": t.assignee, "due_date": t.due_date, "critical": t.critical,
+                   "bone_ids": list(t.bone_ids), "created_at": t.created_at,
+                   "updated_at": t.updated_at, "created_by": t.created_by,
+                   "updated_by": t.updated_by}
+                  for t in sorted(doc.tasks.values(), key=lambda t: t.id)],
         "bones": [bone_dict(r) for r in doc.tree.roots()],
     }
 

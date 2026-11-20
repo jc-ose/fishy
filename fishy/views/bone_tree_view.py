@@ -145,12 +145,13 @@ class BoneTreeView(QTreeView):
         self.setItemDelegateForColumn(Col.STATUS, ChoiceDelegate(doc, "status", self))
         header = self.header()
         header.moveSection(header.visualIndex(Col.NUMBER), 0)  # "#" shown first
+        header.moveSection(header.visualIndex(Col.TASKS), header.visualIndex(Col.LOG) + 1)
         header.setStretchLastSection(False)
         header.setSectionResizeMode(Col.TITLE, QHeaderView.ResizeMode.Stretch)
         header.setMinimumSectionSize(36)
         # Title stretches and gets whatever the fixed columns leave; keep those compact.
         for col, width in ((Col.NUMBER, 56), (Col.LEVEL, 175), (Col.STATUS, 140),
-                           (Col.LOG, 40), (Col.UPDATED, 118)):
+                           (Col.LOG, 40), (Col.TASKS, 52), (Col.UPDATED, 118)):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             header.resizeSection(col, width)
         self.expandAll()

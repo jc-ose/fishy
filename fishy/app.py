@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.tree.deleteRequested.connect(self.delete_bone)
         self.details.evidence.boneLinkClicked.connect(self.select_bone)
         self.timeline: QDialog | None = None
+        self.tasks_window: QDialog | None = None
 
         self._build_toolbars()
         self._restore_layout()
@@ -171,8 +172,11 @@ class MainWindow(QMainWindow):
         self.export_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         bar.addWidget(self.export_button)
+        self.tasks_csv_act = self._act("Export tasks (CSV)…", self.export_tasks_csv,
+                                       tip="Every task, for a spreadsheet")
+        export_menu.addAction(self.tasks_csv_act)
         self.export_actions = [self.export_act, self.copy_image_act, self.outline_act,
-                               self.copy_outline_act, self.json_act]
+                               self.copy_outline_act, self.json_act, self.tasks_csv_act]
         bar.addSeparator()
         self.undo_act = self._act("Undo", lambda: self.doc and self.doc.undo_stack.undo(),
                                   "Ctrl+Z")
@@ -293,6 +297,9 @@ class MainWindow(QMainWindow):
         self.timeline_act = self._act("Timeline", self.show_timeline, "Ctrl+T",
                                       tip="Every evidence entry in the project, by date")
         bar2.addAction(self.timeline_act)
+        self.tasks_act = self._act("Tasks", self.show_tasks, "Ctrl+Shift+T",
+                                   tip="Every task in the project: sort, filter, edit, export")
+        bar2.addAction(self.tasks_act)
         bar2.addSeparator()
         bar2.addAction(self._act("Fit", self.view.fit_all, "Ctrl+0", tip="Fit diagram"))
         bar2.addAction(self._act("Zoom to selection", self.view.zoom_to_selection, "Ctrl+E"))
@@ -370,8 +377,12 @@ class MainWindow(QMainWindow):
         if self.timeline is not None:
             self.timeline.close()
             self.timeline = None
+        if self.tasks_window is not None:
+            self.tasks_window.close()
+            self.tasks_window = None
         for act in [*self.edit_actions, *self.export_actions, self.copy_act, self.rollup_act,
-                    self.status_act, self.legend_act, self.choices_act, self.timeline_act]:
+                    self.status_act, self.legend_act, self.choices_act, self.timeline_act,
+                    self.tasks_act]:
             act.setEnabled(enabled)
         for w in (self.problem_edit, self.style_box, self.find_box, self.tree, self.legend_pos,
                   self.filter_button):
@@ -732,6 +743,29 @@ class MainWindow(QMainWindow):
         self.timeline.show()
         self.timeline.raise_()
         self.timeline.activateWindow()
+
+    def show_tasks(self) -> None:
+        from fishy.views.tasks import TasksWindow
+
+        if not self.doc:
+            return
+        if self.tasks_window is None:
+            self.tasks_window = TasksWindow(self.doc, self)
+            self.tasks_window.boneSelected.connect(self.select_bone)
+            self.tasks_window.openEntry.connect(self.open_entry)
+        self.tasks_window.show()
+        self.tasks_window.raise_()
+        self.tasks_window.activateWindow()
+
+    def export_tasks_csv(self) -> None:
+        from fishy.export import write_tasks_csv
+
+        if self.doc and (path := self._data_path("Export tasks as CSV", ".csv",
+                                                 "CSV (*.csv)")):
+            self.details._flush()
+            write_tasks_csv(self.doc, path)
+            self.statusBar().showMessage(f"Exported {len(self.doc.tasks)} tasks to {path}",
+                                         5000)
 
     def open_entry(self, bone_id: int, entry_id: int) -> None:
         if not self.editor_split.isVisible():
